@@ -286,13 +286,15 @@ const unsigned long SENSOR_READ_INTERVAL = 100;  // ms
 uint8_t currentSensorChannel = 0;  // 0 = CH0, 1 = CH1, 2 = BOTH
 
 // LED Matrix Configuration
-#define LED_PIN 0           // Data pin for addressable LEDs
-#define NUM_LEDS 64         // Number of LEDs (64 for 8x8 matrix)
+#define LED_PIN 0           // Data pin for LEFT LED matrix
+#define LED_PIN_R 1         // Data pin for RIGHT LED matrix
+#define NUM_LEDS 64         // Number of LEDs per matrix (64 for 8x8)
 #define MATRIX_WIDTH 8      // Matrix width (columns)
 #define MATRIX_HEIGHT 8     // Matrix height (rows)
 #define LED_TYPE WS2812B    // LED type (WS2812/NeoPixel)
 #define COLOR_ORDER GRB     // Color order for WS2812B
-CRGB leds[NUM_LEDS];        // LED array
+CRGB leds[NUM_LEDS];        // Left LED matrix array
+CRGB leds_r[NUM_LEDS];      // Right LED matrix array
 
 // LED Matrix Layout: SERPENTINE (zigzag pattern)
 // Row 0: LED 0  →  1  →  2  →  3  →  4  →  5  →  6  →  7
@@ -1517,12 +1519,11 @@ void processDualTheremin() {
   stringFilter.frequency(dualThereminFilter);
   stringFilter.resonance(0.7);
 
-  // Visual feedback on LED matrix (8x8)
-  // Show both hands in different colors
+  // Visual feedback — left matrix = pitch hand, right matrix = volume hand
   if (ledVisualizationEnabled) {
     clearAllLEDs();
 
-    // Draw left hand position (blue - pitch control)
+    // Left matrix: draw left hand position (blue - pitch control)
     if (leftHandZones > 0) {
       int ledIndex = leftHandCentroidY * 8 + leftHandCentroidX;
       if (ledIndex >= 0 && ledIndex < 64) {
@@ -1530,11 +1531,11 @@ void processDualTheremin() {
       }
     }
 
-    // Draw right hand position (red - volume control)
+    // Right matrix: draw right hand position (red - volume control)
     if (rightHandZones > 0) {
       int ledIndex = rightHandCentroidY * 8 + rightHandCentroidX;
       if (ledIndex >= 0 && ledIndex < 64) {
-        leds[ledIndex] = CRGB::Red;
+        leds_r[ledIndex] = CRGB::Red;
       }
     }
 
@@ -1617,7 +1618,7 @@ void processDualDrums() {
   if (ledVisualizationEnabled && millis() - lastDrumHitTime > 100) {
     clearAllLEDs();
 
-    // Show left hand (drum trigger)
+    // Left matrix: show left hand (drum trigger)
     if (leftHandZones > 0) {
       int ledIndex = leftHandCentroidY * 8 + leftHandCentroidX;
       if (ledIndex >= 0 && ledIndex < 64) {
@@ -1625,11 +1626,11 @@ void processDualDrums() {
       }
     }
 
-    // Show right hand (volume control)
+    // Right matrix: show right hand (volume control)
     if (rightHandZones > 0) {
       int ledIndex = rightHandCentroidY * 8 + rightHandCentroidX;
       if (ledIndex >= 0 && ledIndex < 64) {
-        leds[ledIndex] = CRGB::Magenta;
+        leds_r[ledIndex] = CRGB::Magenta;
       }
     }
 
@@ -1698,24 +1699,24 @@ void processDualPiano() {
   if (ledVisualizationEnabled) {
     clearAllLEDs();
 
-    // Show selected note as a vertical bar (left side)
+    // Left matrix: show selected note as a vertical bar
     if (selectedNote >= 0) {
       int barHeight = map(selectedNote, 0, PIANO_NOTE_MAX, 0, 7);
       for (int y = 7; y >= (7 - barHeight); y--) {
-        for (int x = 0; x < 4; x++) {
+        for (int x = 0; x < 8; x++) {
           int ledIndex = y * 8 + x;
           leds[ledIndex] = CRGB::Blue;
         }
       }
     }
 
-    // Show velocity as a vertical bar (right side)
+    // Right matrix: show velocity as a vertical bar
     if (pianoNoteVelocity > 0.0) {
       int velHeight = (int)(pianoNoteVelocity * 7.0);
       for (int y = 7; y >= (7 - velHeight); y--) {
-        for (int x = 4; x < 8; x++) {
+        for (int x = 0; x < 8; x++) {
           int ledIndex = y * 8 + x;
-          leds[ledIndex] = CRGB::Red;
+          leds_r[ledIndex] = CRGB::Red;
         }
       }
     }
@@ -2217,45 +2218,38 @@ void processDualLoop() {
   }
 
   // --- LED VISUALIZATION ---
-  // Split display: left 4 cols = melody, right 4 cols = drums
+  // Left matrix = melody pattern, Right matrix = drum pattern
   if (ledVisualizationEnabled) {
     clearAllLEDs();
 
     for (int row = 0; row < 8; row++) {
-      // Left half: melody pattern (columns 0-3 show steps 0-7 compressed)
       for (int col = 0; col < 8; col++) {
-        int ledRow = row;
-        int ledCol = col;
-        // Use full grid but split color coding
-        int ledIndex = ledRow * 8 + ledCol;
-
+        int ledIndex = row * 8 + col;
         bool melodyActive = dualLoopMelody[col][row];
         bool drumActive = dualLoopDrums[col][row];
 
+        // Left matrix: melody
         if (col == dualLoopStep) {
-          // Playhead column
-          if (melodyActive && drumActive) {
-            leds[ledIndex] = CRGB::White;  // Both active
-          } else if (melodyActive) {
-            leds[ledIndex] = CRGB(0, 255, 100);  // Bright green for melody
-          } else if (drumActive) {
-            leds[ledIndex] = CRGB(255, 100, 0);  // Bright orange for drums
+          if (melodyActive) {
+            leds[ledIndex] = CRGB(0, 255, 100);  // Bright green
           } else {
-            leds[ledIndex] = CRGB(20, 20, 20);  // Dim playhead
+            leds[ledIndex] = CRGB(20, 20, 20);   // Dim playhead
           }
-        } else {
-          if (melodyActive && drumActive) {
-            leds[ledIndex] = CRGB(180, 180, 0);  // Yellow = both
-          } else if (melodyActive) {
-            // Color by note pitch
-            uint8_t hue = 80 + (row * 10);  // Green-blue range
-            leds[ledIndex] = CHSV(hue, 255, 120);
-          } else if (drumActive) {
-            // Color by drum type
-            uint8_t hue = (row * 32);  // Red-orange range
-            leds[ledIndex] = CHSV(hue, 255, 120);
+        } else if (melodyActive) {
+          uint8_t hue = 80 + (row * 10);
+          leds[ledIndex] = CHSV(hue, 255, 120);
+        }
+
+        // Right matrix: drums
+        if (col == dualLoopStep) {
+          if (drumActive) {
+            leds_r[ledIndex] = CRGB(255, 100, 0); // Bright orange
+          } else {
+            leds_r[ledIndex] = CRGB(20, 20, 20);  // Dim playhead
           }
-          // else stays black
+        } else if (drumActive) {
+          uint8_t hue = (row * 32);
+          leds_r[ledIndex] = CHSV(hue, 255, 120);
         }
       }
     }
@@ -2347,31 +2341,29 @@ void processChordJam() {
   // --- LED VISUALIZATION ---
   if (ledVisualizationEnabled) {
     clearAllLEDs();
-    // Left half: show which chord is selected (rows 0-1=I, 2-3=IV, 4-5=V, 6-7=vi)
+    // Left matrix: show which chord is selected (rows 0-1=I, 2-3=IV, 4-5=V, 6-7=vi)
     for (int row = 0; row < 8; row++) {
       int chordGroup = row / 2;
-      for (int col = 0; col < 4; col++) {
+      for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
         if (chordGroup == chordJamIndex) {
-          // Selected chord - bright color
           uint8_t hue = chordGroup * 60;
           leds[ledIndex] = CHSV(hue, 255, 200);
         } else {
-          // Unselected - dim
           uint8_t hue = chordGroup * 60;
           leds[ledIndex] = CHSV(hue, 255, 30);
         }
       }
     }
-    // Right half: strum intensity
+    // Right matrix: strum intensity
     int strumBrightness = 0;
     if (currentTime - chordJamLastStrum < 200) {
       strumBrightness = 255 - ((currentTime - chordJamLastStrum) * 255 / 200);
     }
     for (int row = 0; row < 8; row++) {
-      for (int col = 4; col < 8; col++) {
+      for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
-        leds[ledIndex] = CRGB(strumBrightness, strumBrightness / 2, 0);
+        leds_r[ledIndex] = CRGB(strumBrightness, strumBrightness / 2, 0);
       }
     }
     FastLED.show();
@@ -2447,8 +2439,9 @@ void processDroneSolo() {
   // --- LED VISUALIZATION ---
   if (ledVisualizationEnabled) {
     clearAllLEDs();
+    // Left matrix: drone visualization
     for (int row = 0; row < 8; row++) {
-      for (int col = 0; col < 4; col++) {
+      for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
         if (droneRow >= 0 && row == droneRow) {
           uint8_t pulse = 128 + 127 * sin(currentTime / 200.0);
@@ -2457,12 +2450,15 @@ void processDroneSolo() {
           leds[ledIndex] = CRGB(0, 10, 10);
         }
       }
-      for (int col = 4; col < 8; col++) {
+    }
+    // Right matrix: solo notes
+    for (int row = 0; row < 8; row++) {
+      for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
         if (soloRow >= 0 && row == soloRow) {
-          leds[ledIndex] = CRGB(255, 50, 255);
+          leds_r[ledIndex] = CRGB(255, 50, 255);
         } else {
-          leds[ledIndex] = CRGB(10, 0, 10);
+          leds_r[ledIndex] = CRGB(10, 0, 10);
         }
       }
     }
@@ -2612,6 +2608,7 @@ void processBassMachine() {
   // --- LED VISUALIZATION ---
   if (ledVisualizationEnabled) {
     clearAllLEDs();
+    // Left matrix: bass pattern grid
     for (int row = 0; row < 8; row++) {
       for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
@@ -2622,10 +2619,18 @@ void processBassMachine() {
             leds[ledIndex] = CRGB(20, 5, 0);  // Dim amber playhead
           }
         } else if (bassGrid[col][row]) {
-          // Deep orange/red for bass
           uint8_t brightness = 100 + (int)(bassFilterFreq / 20.0);
           leds[ledIndex] = CRGB(brightness, brightness / 4, 0);
         }
+      }
+    }
+    // Right matrix: filter frequency visualization (bar height = filter cutoff)
+    int filterBar = constrain((int)((bassFilterFreq / 2000.0) * 8.0), 0, 7);
+    for (int row = 7; row >= (7 - filterBar); row--) {
+      for (int col = 0; col < 8; col++) {
+        int ledIndex = row * 8 + col;
+        uint8_t hue = map(row, 0, 7, 0, 40);  // Red to orange
+        leds_r[ledIndex] = CHSV(hue, 255, 180);
       }
     }
     FastLED.show();
@@ -2717,17 +2722,15 @@ void processEchoDelay() {
   // --- LED VISUALIZATION ---
   if (ledVisualizationEnabled) {
     clearAllLEDs();
-    // Show echo ripple effect
+    // Left matrix: echo ripple effect + hand position
     if (echoPlaying) {
-      int elapsed = (currentTime - echoStartTime);
       for (int i = 0; i < echoPlayIndex; i++) {
         int radius = i + 1;
         uint8_t brightness = 255 - (i * 40);
         uint8_t hue = 160 + (i * 15);  // Blue to purple
-        // Draw expanding ring
         for (int row = 0; row < 8; row++) {
           for (int col = 0; col < 8; col++) {
-            int dist = abs(row - 4) + abs(col - 4);  // Manhattan distance from center
+            int dist = abs(row - 4) + abs(col - 4);
             if (dist == radius) {
               leds[row * 8 + col] = CHSV(hue, 200, brightness);
             }
@@ -2735,10 +2738,17 @@ void processEchoDelay() {
         }
       }
     }
-    // Show hand position
     if (playRow >= 0) {
       for (int col = 0; col < 8; col++) {
         leds[playRow * 8 + col] = CRGB(255, 255, 255);
+      }
+    }
+    // Right matrix: delay time visualization (bar height = delay length)
+    int delayBar = constrain((int)((echoDelayMs / 600.0) * 8.0), 0, 7);
+    for (int row = 7; row >= (7 - delayBar); row--) {
+      for (int col = 0; col < 8; col++) {
+        uint8_t hue = map(row, 0, 7, 180, 220);
+        leds_r[row * 8 + col] = CHSV(hue, 200, 150);
       }
     }
     FastLED.show();
@@ -2819,14 +2829,12 @@ void processBattleMode() {
   // --- LED VISUALIZATION ---
   if (ledVisualizationEnabled) {
     clearAllLEDs();
-    // Left half = Player 1 (blue), Right half = Player 2 (red)
-    // Active zones glow, score shown as filled bars
     int p1Bar = constrain(battleScore[0] / 8, 0, 7);
     int p2Bar = constrain(battleScore[1] / 8, 0, 7);
 
     for (int row = 0; row < 8; row++) {
-      // P1 side
-      for (int col = 0; col < 4; col++) {
+      // Left matrix = Player 1 (blue)
+      for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
         if (p1Row >= 0 && row == p1Row) {
           leds[ledIndex] = CRGB(0, 100, 255);  // Bright blue
@@ -2834,13 +2842,13 @@ void processBattleMode() {
           leds[ledIndex] = CRGB(0, 20, 60);  // Dim score bar
         }
       }
-      // P2 side
-      for (int col = 4; col < 8; col++) {
+      // Right matrix = Player 2 (red)
+      for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
         if (p2Row >= 0 && row == p2Row) {
-          leds[ledIndex] = CRGB(255, 50, 0);  // Bright orange-red
+          leds_r[ledIndex] = CRGB(255, 50, 0);  // Bright orange-red
         } else if (row <= p2Bar) {
-          leds[ledIndex] = CRGB(60, 10, 0);  // Dim score bar
+          leds_r[ledIndex] = CRGB(60, 10, 0);  // Dim score bar
         }
       }
     }
@@ -3169,27 +3177,38 @@ void printBothGrids() {
 // ============================================================================
 
 void setupLEDs() {
-  // Initialize FastLED library
-  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  // Initialize FastLED library — two 8x8 matrices
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);    // Left matrix (pin 0)
+  FastLED.addLeds<LED_TYPE, LED_PIN_R, COLOR_ORDER>(leds_r, NUM_LEDS); // Right matrix (pin 1)
   FastLED.setBrightness(50);  // Set brightness (0-255), 50 is moderate
   clearAllLEDs();
-  Serial.print("FastLED initialized on pin 0 with ");
+  Serial.println("FastLED initialized: Left matrix on pin 0, Right matrix on pin 1");
+  Serial.print("Each matrix: ");
   Serial.print(NUM_LEDS);
-  Serial.println(" LEDs (8x8 matrix, serpentine layout)");
+  Serial.println(" LEDs (8x8, serpentine layout)");
 }
 
 void setLED(int index, CRGB color) {
-  // Set a specific LED to a color
+  // Set a specific LED on the left matrix
   if (index >= 0 && index < NUM_LEDS) {
     leds[index] = color;
     FastLED.show();
   }
 }
 
+void setLED_R(int index, CRGB color) {
+  // Set a specific LED on the right matrix
+  if (index >= 0 && index < NUM_LEDS) {
+    leds_r[index] = color;
+    FastLED.show();
+  }
+}
+
 void clearAllLEDs() {
-  // Turn off all LEDs
+  // Turn off all LEDs on both matrices
   for (int i = 0; i < NUM_LEDS; i++) {
     leds[i] = CRGB::Black;
+    leds_r[i] = CRGB::Black;
   }
   FastLED.show();
 }
