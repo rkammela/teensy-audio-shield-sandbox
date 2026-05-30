@@ -30,16 +30,12 @@
 
 enum PlayMode {
   MODE_STRING_THEREMIN,
-  MODE_GESTURE_DRUM,
-  MODE_THEREMIN,
   MODE_DISTANCE_SENSOR,
   MODE_DUAL_THEREMIN,  // Dual-hand theremin with ToF sensors
-  MODE_DUAL_DRUMS,     // Dual-hand spatial drum kit
   MODE_DUAL_PIANO,     // Dual-hand piano/string instrument
   MODE_GRID_SEQUENCER, // 64-zone MIDI pad style
   MODE_RHYTHM_TAPPER,  // 8-drum rhythm game style
   MODE_ARPEGGIATOR,    // Auto-arpeggiating chords
-  MODE_DJ_SCRATCH,     // DJ scratch/wobble effects
   MODE_STEP_SEQ,       // Auto-looping step sequencer
   MODE_DUAL_LOOP,      // Dual-hand layered looper (melody + drums)
   MODE_CHORD_JAM,      // Left hand picks chords, right hand strums
@@ -188,12 +184,16 @@ const int PIANO_NOTE_MAX = 12;       // Highest note index (one octave)
 // Grid Sequencer mode variables
 bool gridZoneActive[8][8] = {false}; // Track which zones are currently touched
 unsigned long gridZoneLastTrigger[8][8] = {0};  // Debounce timing
+bool gridZoneActiveR[8][8] = {false};           // Right sensor zones
+unsigned long gridZoneLastTriggerR[8][8] = {0};
 const int GRID_ZONE_THRESHOLD = 400;  // mm - closer than this = touched (lowered for intentional touches)
 const int GRID_DEBOUNCE_MS = 50;      // Minimum time between re-triggers
 
 // Rhythm Tapper mode variables
 bool rhythmRowActive[8] = {false};    // Track which drum rows are active
 unsigned long rhythmRowLastHit[8] = {0};
+bool rhythmRowActiveR[8] = {false};   // Right sensor drum rows
+unsigned long rhythmRowLastHitR[8] = {0};
 const int RHYTHM_DEBOUNCE_MS = 80;    // Fast response!
 
 // Arpeggiator mode variables
@@ -243,6 +243,9 @@ unsigned long soloLastTrigger = 0;
 float rainDropRow[8] = {0};           // Y position of each raindrop (float for smooth animation)
 int rainDropNote[8] = {0};            // MIDI note for each drop
 bool rainDropActive[8] = {false};     // Whether each drop slot is active
+float rainDropRowR[8] = {0};          // Right sensor rain drops
+int rainDropNoteR[8] = {0};
+bool rainDropActiveR[8] = {false};
 unsigned long rainLastFall = 0;
 unsigned long rainLastSpawn = 0;
 float rainSpeed = 0.3;                // Rows per update cycle
@@ -520,47 +523,28 @@ void loop() {
     // Update based on current mode
     if (currentMode == MODE_STRING_THEREMIN) {
       updateStringVoice();
-    } else if (currentMode == MODE_THEREMIN) {
-      updateThereminVoice();
     } else if (currentMode == MODE_DUAL_THEREMIN) {
-      // Dual theremin - process both sensors for gestural control
       if (currentTime - lastDualThereminUpdate >= DUAL_THEREMIN_UPDATE_INTERVAL) {
         lastDualThereminUpdate = currentTime;
         processDualTheremin();
       }
-    } else if (currentMode == MODE_DUAL_DRUMS) {
-      // Dual drums - gesture-based drum triggering
-      if (currentTime - lastDualThereminUpdate >= DUAL_THEREMIN_UPDATE_INTERVAL) {
-        lastDualThereminUpdate = currentTime;
-        processDualDrums();
-      }
     } else if (currentMode == MODE_DUAL_PIANO) {
-      // Dual piano - melodic instrument with expression
       if (currentTime - lastDualThereminUpdate >= DUAL_THEREMIN_UPDATE_INTERVAL) {
         lastDualThereminUpdate = currentTime;
         processDualPiano();
       }
     } else if (currentMode == MODE_GRID_SEQUENCER) {
-      // Grid sequencer - 64-zone MIDI pad
       if (currentTime - lastDualThereminUpdate >= DUAL_THEREMIN_UPDATE_INTERVAL) {
         lastDualThereminUpdate = currentTime;
         processGridSequencer();
       }
     } else if (currentMode == MODE_RHYTHM_TAPPER) {
-      // Rhythm tapper - 8-drum fast rhythm game
       if (currentTime - lastDualThereminUpdate >= DUAL_THEREMIN_UPDATE_INTERVAL) {
         lastDualThereminUpdate = currentTime;
         processRhythmTapper();
       }
     } else if (currentMode == MODE_ARPEGGIATOR) {
-      // Arpeggiator - auto-playing arpeggiated chords
       processArpeggiator();
-    } else if (currentMode == MODE_DJ_SCRATCH) {
-      // DJ Scratch - pitch bending scratch effects
-      if (currentTime - lastDualThereminUpdate >= DUAL_THEREMIN_UPDATE_INTERVAL) {
-        lastDualThereminUpdate = currentTime;
-        processDjScratch();
-      }
     } else if (currentMode == MODE_STEP_SEQ) {
       // Step sequencer - auto-looping beat machine
       processStepSequencer();
@@ -697,16 +681,10 @@ void handleCommand(char c) {
       {
         PlayMode nextMode;
         if (currentMode == MODE_STRING_THEREMIN) {
-          nextMode = MODE_GESTURE_DRUM;
-        } else if (currentMode == MODE_GESTURE_DRUM) {
-          nextMode = MODE_THEREMIN;
-        } else if (currentMode == MODE_THEREMIN) {
           nextMode = MODE_DISTANCE_SENSOR;
         } else if (currentMode == MODE_DISTANCE_SENSOR) {
           nextMode = MODE_DUAL_THEREMIN;
         } else if (currentMode == MODE_DUAL_THEREMIN) {
-          nextMode = MODE_DUAL_DRUMS;
-        } else if (currentMode == MODE_DUAL_DRUMS) {
           nextMode = MODE_DUAL_PIANO;
         } else if (currentMode == MODE_DUAL_PIANO) {
           nextMode = MODE_GRID_SEQUENCER;
@@ -715,8 +693,6 @@ void handleCommand(char c) {
         } else if (currentMode == MODE_RHYTHM_TAPPER) {
           nextMode = MODE_ARPEGGIATOR;
         } else if (currentMode == MODE_ARPEGGIATOR) {
-          nextMode = MODE_DJ_SCRATCH;
-        } else if (currentMode == MODE_DJ_SCRATCH) {
           nextMode = MODE_STEP_SEQ;
         } else if (currentMode == MODE_STEP_SEQ) {
           nextMode = MODE_DUAL_LOOP;
@@ -774,116 +750,60 @@ void handleCommand(char c) {
       panicMute();
       break;
 
-    // Pitch controls - different behavior for THEREMIN mode
-    case 'q':  // Lower pitch (THEREMIN) or closer (STRING/DRUM)
-      if (currentMode == MODE_THEREMIN) {
-        thereminPitch -= THEREMIN_PITCH_STEP;
-        if (thereminPitch < 55.0) thereminPitch = 55.0;  // Limit to A1
-        Serial.print(">> Theremin pitch: ");
-        Serial.print(thereminPitch, 1);
-        Serial.println(" Hz");
-      } else {
-        pitchHandRaw -= DIST_STEP;
-        if (pitchHandRaw < DIST_MIN) pitchHandRaw = DIST_MIN;
-        Serial.print(">> Pitch hand: ");
-        Serial.print(pitchHandRaw);
-        Serial.println(" mm");
-      }
+    // Pitch controls
+    case 'q':  // Closer distance
+      pitchHandRaw -= DIST_STEP;
+      if (pitchHandRaw < DIST_MIN) pitchHandRaw = DIST_MIN;
+      Serial.print(">> Pitch hand: ");
+      Serial.print(pitchHandRaw);
+      Serial.println(" mm");
       break;
 
-    case 'w':  // Higher pitch (THEREMIN) or farther (STRING/DRUM)
-      if (currentMode == MODE_THEREMIN) {
-        thereminPitch += THEREMIN_PITCH_STEP;
-        if (thereminPitch > 1760.0) thereminPitch = 1760.0;  // Limit to A6
-        Serial.print(">> Theremin pitch: ");
-        Serial.print(thereminPitch, 1);
-        Serial.println(" Hz");
-      } else {
-        pitchHandRaw += DIST_STEP;
-        if (pitchHandRaw > DIST_MAX) pitchHandRaw = DIST_MAX;
-        Serial.print(">> Pitch hand: ");
-        Serial.print(pitchHandRaw);
-        Serial.println(" mm");
-      }
+    case 'w':  // Farther distance
+      pitchHandRaw += DIST_STEP;
+      if (pitchHandRaw > DIST_MAX) pitchHandRaw = DIST_MAX;
+      Serial.print(">> Pitch hand: ");
+      Serial.print(pitchHandRaw);
+      Serial.println(" mm");
       break;
 
-    // Zone presets / Register jumps
-    case 'e':  // Zone A / Low register
-      if (currentMode == MODE_THEREMIN) {
-        thereminPitch = 110.0;  // A2 - Low register
-        Serial.println(">> Theremin: LOW register (110 Hz)");
-      } else {
-        pitchHandRaw = ZONE_A_DEFAULT;
-        currentZone = ZONE_A_NEAR;
-        Serial.println(">> Pitch hand -> Zone A (150mm) - KICK");
-      }
+    // Zone presets
+    case 'e':  // Zone A
+      pitchHandRaw = ZONE_A_DEFAULT;
+      currentZone = ZONE_A_NEAR;
+      Serial.println(">> Pitch hand -> Zone A (150mm)");
       break;
 
-    case 'r':  // Zone B / Mid register
-      if (currentMode == MODE_THEREMIN) {
-        thereminPitch = 440.0;  // A4 - Mid register
-        Serial.println(">> Theremin: MID register (440 Hz)");
-      } else {
-        pitchHandRaw = ZONE_B_DEFAULT;
-        currentZone = ZONE_B_MID;
-        Serial.println(">> Pitch hand -> Zone B (350mm) - SNARE");
-      }
+    case 'r':  // Zone B
+      pitchHandRaw = ZONE_B_DEFAULT;
+      currentZone = ZONE_B_MID;
+      Serial.println(">> Pitch hand -> Zone B (350mm)");
       break;
 
-    case 't':  // Zone C / High register
-      if (currentMode == MODE_THEREMIN) {
-        thereminPitch = 880.0;  // A5 - High register
-        Serial.println(">> Theremin: HIGH register (880 Hz)");
-      } else {
-        pitchHandRaw = ZONE_C_DEFAULT;
-        currentZone = ZONE_C_FAR;
-        Serial.println(">> Pitch hand -> Zone C (650mm) - HI-HAT");
-      }
-      break;
-
-    // Drum triggers (DRUM mode)
-    case '[':  // LOUD hit
-      if (currentMode == MODE_GESTURE_DRUM) {
-        Serial.println(">> LOUD hit!");
-        triggerDrumHit(currentZone, 1.0);  // Maximum velocity
-      }
-      break;
-
-    case ']':  // Quiet hit
-      if (currentMode == MODE_GESTURE_DRUM) {
-        Serial.println(">> quiet hit");
-        triggerDrumHit(currentZone, 0.2);  // Very low velocity
-      }
+    case 't':  // Zone C
+      pitchHandRaw = ZONE_C_DEFAULT;
+      currentZone = ZONE_C_FAR;
+      Serial.println(">> Pitch hand -> Zone C (650mm)");
       break;
 
     case 'v':  // Vibrato toggle
-      if (currentMode == MODE_STRING_THEREMIN || currentMode == MODE_THEREMIN) {
+      if (currentMode == MODE_STRING_THEREMIN) {
         vibratoEnabled = !vibratoEnabled;
         Serial.print(">> Vibrato: ");
         Serial.println(vibratoEnabled ? "ON" : "OFF");
       }
       break;
 
-    // Piano keys (STRING mode) / Volume controls (THEREMIN mode)
-    case 'a':  // Note 1 (STRING) / Volume down (THEREMIN)
+    // Piano keys (STRING mode)
+    case 'a':  // Note 1
       if (currentMode == MODE_STRING_THEREMIN) {
         playScaleNote(0);
-      } else if (currentMode == MODE_THEREMIN) {
-        thereminVolume -= THEREMIN_VOLUME_STEP;
-        if (thereminVolume < 0.0) thereminVolume = 0.0;
-        Serial.print(">> Theremin volume: ");
-        Serial.println(thereminVolume, 2);
       }
       break;
 
-    case 's':  // Note 2 (STRING) / Volume up (THEREMIN)
+    case 's':  // Note 2
       if (currentMode == MODE_STRING_THEREMIN) {
         playScaleNote(1);
-      } else if (currentMode == MODE_THEREMIN) {
-        thereminVolume += THEREMIN_VOLUME_STEP;
-        if (thereminVolume > 1.0) thereminVolume = 1.0;
-        Serial.print(">> Theremin volume: ");
-        Serial.println(thereminVolume, 2);
       }
       break;
 
@@ -1726,49 +1646,59 @@ void processDualPiano() {
 }
 
 void processGridSequencer() {
-  // 64-zone MIDI pad style sequencer
-  // Each zone of the 8x8 grid plays a different note
-  // Super responsive - uses individual zone distances, no averaging!
-
-  // Read left sensor (main instrument)
-  if (sensor_ch0_initialized) {
-    readDistanceGrid(0);
-  }
+  // 64-zone MIDI pad — uses BOTH sensors and BOTH LED matrices
+  if (sensor_ch0_initialized) readDistanceGrid(0);
+  if (sensor_ch1_initialized) readDistanceGrid(1);
 
   unsigned long currentTime = millis();
-  bool anyZoneActive = false;
 
-  // Process each zone individually
+  // --- LEFT sensor → left LED matrix (lower octaves) ---
   for (int row = 0; row < 8; row++) {
     for (int col = 0; col < 8; col++) {
       uint16_t dist = distanceGrid_ch0[row][col];
       int zoneIndex = row * 8 + col;
-
-      // Check if zone is touched (closer than threshold)
       bool wasTouched = gridZoneActive[row][col];
       bool isTouched = (dist < GRID_ZONE_THRESHOLD && dist > 50);
 
-      // Trigger on new touch (not retriggering if already touched)
       if (isTouched && !wasTouched && (currentTime - gridZoneLastTrigger[row][col]) > GRID_DEBOUNCE_MS) {
-        // Play note for this zone
-        // Map zone to note in scale (64 zones = multiple octaves)
-        int noteIndex = zoneIndex % 13;  // 0-12 repeating pattern
+        int noteIndex = zoneIndex % 13;
         playScaleNote(noteIndex);
-
         gridZoneLastTrigger[row][col] = currentTime;
-        anyZoneActive = true;
       }
-
       gridZoneActive[row][col] = isTouched;
 
-      // LED feedback - show touched zones
       if (ledVisualizationEnabled) {
         if (isTouched) {
-          // Color based on note (rainbow effect)
           uint8_t hue = (zoneIndex * 256 / 64);
           leds[zoneIndex] = CHSV(hue, 255, 255);
         } else {
           leds[zoneIndex] = CRGB::Black;
+        }
+      }
+    }
+  }
+
+  // --- RIGHT sensor → right LED matrix (higher octaves) ---
+  for (int row = 0; row < 8; row++) {
+    for (int col = 0; col < 8; col++) {
+      uint16_t dist = distanceGrid_ch1[row][col];
+      int zoneIndex = row * 8 + col;
+      bool wasTouched = gridZoneActiveR[row][col];
+      bool isTouched = (dist < GRID_ZONE_THRESHOLD && dist > 50);
+
+      if (isTouched && !wasTouched && (currentTime - gridZoneLastTriggerR[row][col]) > GRID_DEBOUNCE_MS) {
+        int noteIndex = (zoneIndex % 13) + 12;  // One octave higher
+        playScaleNote(noteIndex);
+        gridZoneLastTriggerR[row][col] = currentTime;
+      }
+      gridZoneActiveR[row][col] = isTouched;
+
+      if (ledVisualizationEnabled) {
+        if (isTouched) {
+          uint8_t hue = (zoneIndex * 256 / 64);
+          leds_r[zoneIndex] = CHSV(hue, 255, 255);
+        } else {
+          leds_r[zoneIndex] = CRGB::Black;
         }
       }
     }
@@ -1780,86 +1710,64 @@ void processGridSequencer() {
 }
 
 void processRhythmTapper() {
-  // 8-drum rhythm tapper
-  // Each ROW is a different drum
-  // Touch any column in a row to trigger that drum
-  // Super fast and responsive!
-
-  // Read left sensor
-  if (sensor_ch0_initialized) {
-    readDistanceGrid(0);
-  }
+  // 8-drum rhythm tapper — uses BOTH sensors + BOTH LED matrices
+  if (sensor_ch0_initialized) readDistanceGrid(0);
+  if (sensor_ch1_initialized) readDistanceGrid(1);
 
   unsigned long currentTime = millis();
 
-  // Define drum sounds for each row (0=top, 7=bottom)
   Zone drumMap[8] = {
-    ZONE_C_FAR,   // Row 0: Hi-hat
-    ZONE_C_FAR,   // Row 1: Ride
-    ZONE_B_MID,   // Row 2: Snare
-    ZONE_B_MID,   // Row 3: Clap/Snare
-    ZONE_A_NEAR,  // Row 4: Kick
-    ZONE_A_NEAR,  // Row 5: Low tom
-    ZONE_B_MID,   // Row 6: Mid tom
-    ZONE_C_FAR    // Row 7: High tom
+    ZONE_C_FAR, ZONE_C_FAR, ZONE_B_MID, ZONE_B_MID,
+    ZONE_A_NEAR, ZONE_A_NEAR, ZONE_B_MID, ZONE_C_FAR
+  };
+  CRGB rowColors[8] = {
+    CRGB::Yellow, CRGB::Cyan, CRGB::Red, CRGB::Orange,
+    CRGB::Purple, CRGB::Blue, CRGB::Green, CRGB::White
   };
 
-  // Process each row
+  // --- LEFT sensor → left LED matrix ---
   for (int row = 0; row < 8; row++) {
     bool rowTouched = false;
-    int touchColumn = -1;
-
-    // Check if ANY zone in this row is touched
     for (int col = 0; col < 8; col++) {
       uint16_t dist = distanceGrid_ch0[row][col];
-      if (dist < GRID_ZONE_THRESHOLD && dist > 50) {
-        rowTouched = true;
-        touchColumn = col;
-        break;  // Found a touch, no need to check other columns
-      }
+      if (dist < GRID_ZONE_THRESHOLD && dist > 50) { rowTouched = true; break; }
     }
-
-    // Trigger drum on new touch
     bool wasTouched = rhythmRowActive[row];
     if (rowTouched && !wasTouched && (currentTime - rhythmRowLastHit[row]) > RHYTHM_DEBOUNCE_MS) {
-      // Trigger drum for this row
-      float velocity = 0.8;  // High velocity for punchy drums
-      triggerDrumHit(drumMap[row], velocity);
+      triggerDrumHit(drumMap[row], 0.8);
       rhythmRowLastHit[row] = currentTime;
     }
-
     rhythmRowActive[row] = rowTouched;
-
-    // LED feedback - light up the touched row
     if (ledVisualizationEnabled) {
       for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
-        if (rowTouched) {
-          // Different color for each row
-          CRGB color;
-          switch(row) {
-            case 0: color = CRGB::Yellow; break;   // Hi-hat
-            case 1: color = CRGB::Cyan; break;     // Ride
-            case 2: color = CRGB::Red; break;      // Snare
-            case 3: color = CRGB::Orange; break;   // Clap
-            case 4: color = CRGB::Purple; break;   // Kick
-            case 5: color = CRGB::Blue; break;     // Low tom
-            case 6: color = CRGB::Green; break;    // Mid tom
-            case 7: color = CRGB::White; break;    // High tom
-            default: color = CRGB::White;
-          }
-          leds[ledIndex] = color;
-        } else {
-          // Dim indicator when not touched
-          leds[ledIndex] = CRGB(10, 10, 10);  // Very dim white
-        }
+        leds[ledIndex] = rowTouched ? rowColors[row] : CRGB(10, 10, 10);
       }
     }
   }
 
-  if (ledVisualizationEnabled) {
-    FastLED.show();
+  // --- RIGHT sensor → right LED matrix ---
+  for (int row = 0; row < 8; row++) {
+    bool rowTouched = false;
+    for (int col = 0; col < 8; col++) {
+      uint16_t dist = distanceGrid_ch1[row][col];
+      if (dist < GRID_ZONE_THRESHOLD && dist > 50) { rowTouched = true; break; }
+    }
+    bool wasTouched = rhythmRowActiveR[row];
+    if (rowTouched && !wasTouched && (currentTime - rhythmRowLastHitR[row]) > RHYTHM_DEBOUNCE_MS) {
+      triggerDrumHit(drumMap[row], 0.8);
+      rhythmRowLastHitR[row] = currentTime;
+    }
+    rhythmRowActiveR[row] = rowTouched;
+    if (ledVisualizationEnabled) {
+      for (int col = 0; col < 8; col++) {
+        int ledIndex = row * 8 + col;
+        leds_r[ledIndex] = rowTouched ? rowColors[row] : CRGB(10, 10, 10);
+      }
+    }
   }
+
+  if (ledVisualizationEnabled) FastLED.show();
 }
 
 void processArpeggiator() {
@@ -1939,20 +1847,24 @@ void processArpeggiator() {
 
     arpNoteIndex = (arpNoteIndex + 1) % ARP_CHORD_NOTES;
 
-    // LED visualization - chase pattern
+    // LED visualization - chase pattern on BOTH matrices
     if (ledVisualizationEnabled) {
       clearAllLEDs();
-      // Light up a column based on current note
       int col = arpNoteIndex * 2;
+      uint8_t hue = (arpChordType * 64) + (arpNoteIndex * 30);
       for (int r = 0; r < 8; r++) {
-        uint8_t hue = (arpChordType * 64) + (arpNoteIndex * 30);
+        // Left matrix: chord note chase
         leds[r * 8 + col] = CHSV(hue, 255, 255);
         leds[r * 8 + col + 1] = CHSV(hue, 255, 180);
+        // Right matrix: mirror with complementary color
+        leds_r[r * 8 + (6 - col)] = CHSV(hue + 128, 255, 255);
+        leds_r[r * 8 + (7 - col)] = CHSV(hue + 128, 255, 180);
       }
-      // Speed indicator bar at bottom
+      // Left bottom row: speed indicator
       int speedBar = map(constrain((int)arpSpeed, 50, 400), 400, 50, 0, 7);
       for (int c = 0; c <= speedBar; c++) {
-        leds[56 + c] = CRGB::White;  // Bottom row
+        leds[56 + c] = CRGB::White;
+        leds_r[56 + c] = CRGB::White;
       }
       FastLED.show();
     }
@@ -2105,26 +2017,28 @@ void processStepSequencer() {
     stepPosition = (stepPosition + 1) % 8;
   }
 
-  // LED visualization - show grid pattern with playhead
+  // LED visualization - BOTH matrices show grid pattern with playhead
   if (ledVisualizationEnabled) {
     for (int row = 0; row < 8; row++) {
       for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
+        CRGB color;
         if (col == stepPosition) {
-          // Playhead column - bright
-          if (stepGrid[col][row]) {
-            leds[ledIndex] = CRGB::White;  // Active + playhead
-          } else {
-            leds[ledIndex] = CRGB(30, 30, 0);  // Dim yellow playhead
-          }
+          color = stepGrid[col][row] ? CRGB::White : CRGB(30, 30, 0);
         } else if (stepGrid[col][row]) {
-          // Active step - colored by instrument
           uint8_t hue = row * 32;
-          leds[ledIndex] = CHSV(hue, 255, 150);
+          color = CHSV(hue, 255, 150);
         } else {
-          leds[ledIndex] = CRGB::Black;
+          color = CRGB::Black;
         }
+        leds[ledIndex] = color;
+        leds_r[ledIndex] = color;  // Mirror on right matrix
       }
+    }
+    // Right matrix bottom row: tempo indicator
+    int tempoBar = map(constrain((int)stepTempo, 80, 500), 500, 80, 0, 7);
+    for (int c = 0; c <= tempoBar; c++) {
+      leds_r[56 + c] = CRGB::Cyan;
     }
     FastLED.show();
   }
@@ -2467,15 +2381,17 @@ void processDroneSolo() {
 }
 
 void processRainMode() {
-  // RAIN MODE: Notes fall down the grid, catch them with your hands!
+  // RAIN MODE: Notes fall on BOTH matrices, catch with either hand!
   static const int rainScaleNotes[8] = {60, 62, 64, 65, 67, 69, 71, 72};
 
   unsigned long currentTime = millis();
   if (sensor_ch0_initialized) readDistanceGrid(0);
+  if (sensor_ch1_initialized) readDistanceGrid(1);
 
-  // --- Spawn new raindrops ---
+  // --- Spawn new raindrops on both sides ---
   if (currentTime - rainLastSpawn > 600) {
     rainLastSpawn = currentTime;
+    // Spawn on left
     for (int i = 0; i < 8; i++) {
       if (!rainDropActive[i]) {
         rainDropActive[i] = true;
@@ -2484,9 +2400,18 @@ void processRainMode() {
         break;
       }
     }
+    // Spawn on right
+    for (int i = 0; i < 8; i++) {
+      if (!rainDropActiveR[i]) {
+        rainDropActiveR[i] = true;
+        rainDropRowR[i] = 0.0;
+        rainDropNoteR[i] = random(0, 8);
+        break;
+      }
+    }
   }
 
-  // --- Move raindrops down & check for catches ---
+  // --- Move & catch: LEFT sensor ---
   if (currentTime - rainLastFall > 50) {
     rainLastFall = currentTime;
     for (int i = 0; i < 8; i++) {
@@ -2497,7 +2422,6 @@ void processRainMode() {
         if (dropGridRow >= 0 && dropGridRow < 8) {
           uint16_t d = distanceGrid_ch0[dropGridRow][dropCol];
           if (d < GRID_ZONE_THRESHOLD && d > 50) {
-            // CAUGHT! Play the note
             float freq = 440.0 * pow(2.0, (rainScaleNotes[dropCol] - 69) / 12.0);
             float velocity = constrain(1.0 - (d / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
             stringFilter.frequency(freq * 2.5);
@@ -2512,33 +2436,67 @@ void processRainMode() {
         }
         if (rainDropRow[i] >= 8.0) rainDropActive[i] = false;
       }
+      // RIGHT sensor
+      if (rainDropActiveR[i]) {
+        rainDropRowR[i] += rainSpeed;
+        int dropGridRow = (int)rainDropRowR[i];
+        int dropCol = rainDropNoteR[i];
+        if (dropGridRow >= 0 && dropGridRow < 8) {
+          uint16_t d = distanceGrid_ch1[dropGridRow][dropCol];
+          if (d < GRID_ZONE_THRESHOLD && d > 50) {
+            float freq = 440.0 * pow(2.0, (rainScaleNotes[dropCol] - 69) / 12.0);
+            float velocity = constrain(1.0 - (d / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
+            stringFilter.frequency(freq * 2.5);
+            stringVoice.noteOn(freq, velocity);
+            stringEnvelope.noteOn();
+            noteActive = true;
+            mixer1.gain(0, velocity * masterVolume);
+            rainDropActiveR[i] = false;
+            continue;
+          }
+        }
+        if (rainDropRowR[i] >= 8.0) rainDropActiveR[i] = false;
+      }
     }
   }
 
   // --- LED VISUALIZATION ---
   if (ledVisualizationEnabled) {
     clearAllLEDs();
+    // Left matrix: drops + hand
     for (int i = 0; i < 8; i++) {
       if (rainDropActive[i]) {
         int row = (int)rainDropRow[i];
         int col = rainDropNote[i];
         if (row >= 0 && row < 8) {
-          int ledIndex = row * 8 + col;
           uint8_t hue = col * 32;
-          leds[ledIndex] = CHSV(hue, 255, 200);
+          leds[row * 8 + col] = CHSV(hue, 255, 200);
           if (row > 0) leds[(row - 1) * 8 + col] = CHSV(hue, 255, 60);
         }
       }
     }
-    // Show hand position in green
-    for (int row = 0; row < 8; row++) {
+    for (int row = 0; row < 8; row++)
       for (int col = 0; col < 8; col++) {
         uint16_t d = distanceGrid_ch0[row][col];
-        if (d < GRID_ZONE_THRESHOLD && d > 50) {
-          leds[row * 8 + col] += CRGB(0, 80, 0);
+        if (d < GRID_ZONE_THRESHOLD && d > 50) leds[row * 8 + col] += CRGB(0, 80, 0);
+      }
+    // Right matrix: drops + hand
+    for (int i = 0; i < 8; i++) {
+      if (rainDropActiveR[i]) {
+        int row = (int)rainDropRowR[i];
+        int col = rainDropNoteR[i];
+        if (row >= 0 && row < 8) {
+          uint8_t hue = col * 32;
+          leds_r[row * 8 + col] = CHSV(hue, 255, 200);
+          if (row > 0) leds_r[(row - 1) * 8 + col] = CHSV(hue, 255, 60);
         }
       }
     }
+    for (int row = 0; row < 8; row++)
+      for (int col = 0; col < 8; col++) {
+        uint16_t d = distanceGrid_ch1[row][col];
+        if (d < GRID_ZONE_THRESHOLD && d > 50) leds_r[row * 8 + col] += CRGB(0, 80, 0);
+      }
     FastLED.show();
   }
 }
@@ -3341,13 +3299,13 @@ void setupOLED() {
 
   display.clearDisplay();
 
-  // Yellow section (0-15 pixels): "DISCO" in big letters, centered
+  // Yellow section (0-15 pixels): "AURA" in big letters, centered
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
-  // "DISCO" is 5 chars * 12 pixels wide (textSize 2) = 60 pixels
-  // Center: (128 - 60) / 2 = 34
-  display.setCursor(34, 0);
-  display.println("DISCO");
+  // "AURA" is 4 chars * 12 pixels wide (textSize 2) = 48 pixels
+  // Center: (128 - 48) / 2 = 40
+  display.setCursor(40, 0);
+  display.println("AURA");
 
   display.display();
 }
@@ -3355,13 +3313,13 @@ void setupOLED() {
 void updateOLEDDisplay() {
   display.clearDisplay();
 
-  // ===== YELLOW SECTION (pixels 0-15): "DISCO" title =====
+  // ===== YELLOW SECTION (pixels 0-15): "AURA" title =====
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
-  // "DISCO" is 5 chars * 12 pixels wide (textSize 2) = 60 pixels
-  // Center: (128 - 60) / 2 = 34
-  display.setCursor(34, 0);
-  display.println("DISCO");
+  // "AURA" is 4 chars * 12 pixels wide (textSize 2) = 48 pixels
+  // Center: (128 - 48) / 2 = 40
+  display.setCursor(40, 0);
+  display.println("AURA");
 
   // ===== BLUE SECTION (pixels 16-63): Current mode, centered, big =====
   const char* modeStr = getModeString(currentMode);
@@ -3386,16 +3344,12 @@ void updateOLEDDisplay() {
 const char* getModeString(PlayMode mode) {
   switch (mode) {
     case MODE_STRING_THEREMIN: return "STRING";
-    case MODE_GESTURE_DRUM: return "DRUM";
-    case MODE_THEREMIN: return "THEREMIN";
     case MODE_DISTANCE_SENSOR: return "DISTANCE";
     case MODE_DUAL_THEREMIN: return "DUAL THR";
-    case MODE_DUAL_DRUMS: return "DUAL DRM";
     case MODE_DUAL_PIANO: return "DUAL PIANO";
     case MODE_GRID_SEQUENCER: return "GRID SEQ";
     case MODE_RHYTHM_TAPPER: return "RHYTHM";
     case MODE_ARPEGGIATOR: return "ARPEG";
-    case MODE_DJ_SCRATCH: return "SCRATCH";
     case MODE_STEP_SEQ: return "STEP SEQ";
     case MODE_DUAL_LOOP: return "DUAL LOOP";
     case MODE_CHORD_JAM: return "CHORD JAM";
@@ -3439,15 +3393,7 @@ void switchToMode(PlayMode newMode) {
   Serial.println(getModeString(currentMode));
 
   // Mode-specific initialization
-  if (currentMode == MODE_GESTURE_DRUM) {
-    Serial.println(">> Mode: GESTURE DRUM");
-  } else if (currentMode == MODE_THEREMIN) {
-    Serial.println(">> Mode: THEREMIN");
-    // Start theremin sound immediately
-    stringVoice.noteOn(thereminPitch, 0.7);
-    stringEnvelope.noteOn();
-    noteActive = true;
-  } else if (currentMode == MODE_DISTANCE_SENSOR) {
+  if (currentMode == MODE_DISTANCE_SENSOR) {
     Serial.println(">> Mode: DISTANCE SENSOR (8x8 Grid)");
     // Initialize both sensors if not already done
     if (!sensor_ch0_initialized) {
@@ -3504,35 +3450,6 @@ void switchToMode(PlayMode newMode) {
       Serial.println("   CH1 already initialized");
     }
     // Enable LED visualization by default
-    ledVisualizationEnabled = true;
-    clearAllLEDs();
-    delay(100);
-  } else if (currentMode == MODE_DUAL_DRUMS) {
-    Serial.println(">> Mode: DUAL DRUMS");
-    Serial.println("   Left hand = Trigger drums | Right hand = Volume");
-    // Initialize both sensors if not already done
-    if (!sensor_ch0_initialized) {
-      Serial.println("   Initializing VL53L5CX CH0 (I2C0)...");
-      sensor_ch0_initialized = initDistanceSensor(0);
-      if (sensor_ch0_initialized) {
-        Serial.println("   CH0 initialization SUCCESS");
-      } else {
-        Serial.println("   CH0 initialization FAILED");
-      }
-    } else {
-      Serial.println("   CH0 already initialized");
-    }
-    if (!sensor_ch1_initialized) {
-      Serial.println("   Initializing VL53L5CX CH1 (I2C1)...");
-      sensor_ch1_initialized = initDistanceSensor(1);
-      if (sensor_ch1_initialized) {
-        Serial.println("   CH1 initialization SUCCESS");
-      } else {
-        Serial.println("   CH1 initialization FAILED");
-      }
-    } else {
-      Serial.println("   CH1 already initialized");
-    }
     ledVisualizationEnabled = true;
     clearAllLEDs();
     delay(100);
@@ -3629,18 +3546,6 @@ void switchToMode(PlayMode newMode) {
     arpNoteIndex = 0;
     lastArpNoteTime = 0;
     delay(100);
-  } else if (currentMode == MODE_DJ_SCRATCH) {
-    Serial.println(">> Mode: DJ SCRATCH");
-    Serial.println("   Move hand fast to scratch!");
-    if (!sensor_ch0_initialized) {
-      sensor_ch0_initialized = initDistanceSensor(0);
-    }
-    ledVisualizationEnabled = true;
-    clearAllLEDs();
-    djLastDist = 2000.0;
-    djScratchSpeed = 0.0;
-    djIsScratching = false;
-    delay(100);
   } else if (currentMode == MODE_STEP_SEQ) {
     Serial.println(">> Mode: STEP SEQUENCER");
     Serial.println("   Touch zones to toggle notes, pattern auto-loops!");
@@ -3708,11 +3613,15 @@ void switchToMode(PlayMode newMode) {
     delay(100);
   } else if (currentMode == MODE_RAIN_MODE) {
     Serial.println(">> Mode: RAIN MODE");
-    Serial.println("   Catch falling notes with your hand!");
-    for (int i = 0; i < 8; i++) { rainDropActive[i] = false; rainDropRow[i] = 0; }
+    Serial.println("   Catch falling notes with BOTH hands!");
+    for (int i = 0; i < 8; i++) {
+      rainDropActive[i] = false; rainDropRow[i] = 0;
+      rainDropActiveR[i] = false; rainDropRowR[i] = 0;
+    }
     rainLastFall = 0;
     rainLastSpawn = 0;
     if (sensor_ch0_initialized) readDistanceGrid(0);
+    if (sensor_ch1_initialized) readDistanceGrid(1);
     delay(100);
   } else if (currentMode == MODE_BASS_MACHINE) {
     Serial.println(">> Mode: BASS MACHINE");
@@ -3802,7 +3711,7 @@ void handleEncoderButton() {
     lastButtonPress = currentTime;
 
     // Button action depends on current mode
-    if (currentMode == MODE_STRING_THEREMIN || currentMode == MODE_GESTURE_DRUM) {
+    if (currentMode == MODE_STRING_THEREMIN) {
       // Cycle through scales
       int nextScale = (int)currentScale + 1;
       if (nextScale > SCALE_MINOR) nextScale = SCALE_PENTATONIC;
@@ -3817,10 +3726,6 @@ void handleEncoderButton() {
       if (currentSensorChannel == 0) Serial.println("CH0");
       else if (currentSensorChannel == 1) Serial.println("CH1");
       else Serial.println("BOTH");
-    } else if (currentMode == MODE_THEREMIN) {
-      // Toggle mute or other action
-      panicMute();
-      Serial.println(">> Theremin muted");
     } else if (currentMode == MODE_DUAL_LOOP) {
       // Reset both melody and drum layers
       Serial.println(">> DUAL LOOP: Clearing all layers!");
@@ -3861,7 +3766,7 @@ void handleEncoderButton() {
       FastLED.show();
     } else if (currentMode == MODE_RAIN_MODE) {
       Serial.println(">> RAIN: Reset!");
-      for (int i = 0; i < 8; i++) rainDropActive[i] = false;
+      for (int i = 0; i < 8; i++) { rainDropActive[i] = false; rainDropActiveR[i] = false; }
       panicMute();
       clearAllLEDs();
       FastLED.show();
