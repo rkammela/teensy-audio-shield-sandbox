@@ -30,6 +30,7 @@
 #include <Encoder.h>
 
 #include "Config.h"
+#include "MusicNotes.h"
 
 // ============================================================================
 // AUDIO OBJECT DECLARATIONS
@@ -534,11 +535,10 @@ void processDualLoop() {
     dualLoopLastStep = currentTime;
 
     // Play melody notes at current step (left hand grid)
-    // 8 rows = 8 notes in scale (C4 to C5)
-    int melodyMidi[] = {60, 62, 64, 65, 67, 69, 71, 72};  // C major scale
+    // 8 rows = 8 notes of the C major scale (C4 to C5)
     for (int note = 0; note < 8; note++) {
       if (dualLoopMelody[dualLoopStep][note]) {
-        float freq = 440.0 * pow(2.0, (melodyMidi[note] - 69) / 12.0);
+        float freq = MusicNotes::midiToFreq(MusicNotes::MAJOR_SCALE_C4[note]);
         stringFilter.frequency(freq * 2.5);
         stringFilter.resonance(1.2);
         stringVoice.noteOn(freq, 0.8);
@@ -626,7 +626,7 @@ void processChordJam() {
   //     strumming several times in a row = arpeggiated chord (Karplus-Strong
   //     decay tails overlap so it sounds like a chord, not a sequence).
   //   No fretted strings = muted, just like palming the strings on a real guitar.
-  static const int stringNotes[4] = {52, 57, 62, 67};  // E3, A3, D4, G4
+  // String pitches come from MusicNotes::GUITAR_OPEN_TUNING_TOP4 (E3, A3, D4, G4).
   static const CRGB stringColors[4] = {
     CRGB(255,  60,  40),  // string 0 - red    (E)
     CRGB(255, 180,   0),  // string 1 - amber  (A)
@@ -712,7 +712,7 @@ void processChordJam() {
     }
 
     if (playString >= 0) {
-      float freq = 440.0 * pow(2.0, (stringNotes[playString] - 69) / 12.0);
+      float freq = MusicNotes::midiToFreq(MusicNotes::GUITAR_OPEN_TUNING_TOP4[playString]);
       float coverage = (float)rightZones / 64.0;
       float velocity = constrain(0.4 + coverage * 0.6, 0.3, 1.0);
       stringFilter.frequency(freq * 3.0);
@@ -782,8 +782,7 @@ void processChordJam() {
 
 void processBassMachine() {
   // BASS MACHINE: Left hand = toggle bass notes in loop, Right hand = filter sweep
-  // Low bass notes: C2, D2, E2, F2, G2, A2, B2, C3
-  static const int bassNotes[8] = {36, 38, 40, 41, 43, 45, 47, 48};
+  // Bass notes come from MusicNotes::MAJOR_SCALE_C2 (C2..C3).
 
   unsigned long currentTime = millis();
 
@@ -830,7 +829,7 @@ void processBassMachine() {
 
     for (int note = 0; note < 8; note++) {
       if (bassGrid[bassStep][note]) {
-        float freq = 440.0 * pow(2.0, (bassNotes[note] - 69) / 12.0);
+        float freq = MusicNotes::midiToFreq(MusicNotes::MAJOR_SCALE_C2[note]);
         stringFilter.frequency(bassFilterFreq);
         stringFilter.resonance(3.0);  // Resonant for funky tone
         stringVoice.noteOn(freq, 0.9);
@@ -927,7 +926,7 @@ void processBattleMode() {
   if (sensor_ch0_initialized) readDistanceGrid(0);
   if (sensor_ch1_initialized) readDistanceGrid(1);
 
-  static const int battleNotes[8] = {60, 62, 64, 65, 67, 69, 71, 72};
+  // Both players use the same C major scale (C4..C5) from MusicNotes.
 
   // --- PLAYER 1 (CH0): Play on string voice ---
   int p1Row = -1;
@@ -944,7 +943,7 @@ void processBattleMode() {
   }
 
   if (p1Row >= 0) {
-    float freq = 440.0 * pow(2.0, (battleNotes[p1Row] - 69) / 12.0);
+    float freq = MusicNotes::midiToFreq(MusicNotes::MAJOR_SCALE_C4[p1Row]);
     float vel = constrain(1.0 - (p1Dist / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
     battleFreq[0] = freq;
     battleVol[0] = vel;
@@ -972,7 +971,7 @@ void processBattleMode() {
   }
 
   if (p2Row >= 0) {
-    float freq = 440.0 * pow(2.0, (battleNotes[p2Row] - 69) / 12.0);
+    float freq = MusicNotes::midiToFreq(MusicNotes::MAJOR_SCALE_C4[p2Row]);
     float vel = constrain(1.0 - (p2Dist / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
     battleFreq[1] = freq;
     battleVol[1] = vel;
