@@ -30,3 +30,7 @@ Desktop.ini
 *.tmp
 *.bak
 *.log
+
+# Agent scratch files (ignored to avoid accidentally committing tool output)
+_*.txt
+main_instrument_sandbox_backup.cpp
