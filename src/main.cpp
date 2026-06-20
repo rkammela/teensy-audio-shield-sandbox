@@ -24,28 +24,43 @@
 #include <Adafruit_SSD1306.h>
 #include <Encoder.h>
 
-// ============================================================================
-// ENUMS AND CONSTANTS
-// ============================================================================
-
 enum PlayMode {
+  // ---- Diagnostic surfaced at the top of the menu ----
+  MODE_BACKSTAGE,      // Both sensors rendered on both LED matrices at once
+  MODE_BACKSTAGE_2,    // LED-only animation: pulsing heart (L) + treble clef (R)
+  // ---- Headline performance modes (no prefix on OLED) ----
+  MODE_CHORD_JAM,      // Guitar-style: fretboard + strumming
+  MODE_DUAL_LOOP,      // Dual-hand layered looper (melody + drums)
+  MODE_BASS_MACHINE,   // Looping bass line with filter sweep
+  MODE_BATTLE_MODE,    // Two player dueling melodies
+  // ---- Other working performance modes ----
   MODE_STRING_THEREMIN,
-  MODE_DISTANCE_SENSOR,
-  MODE_DUAL_THEREMIN,  // Dual-hand theremin with ToF sensors
   MODE_DUAL_PIANO,     // Dual-hand piano/string instrument
   MODE_GRID_SEQUENCER, // 64-zone MIDI pad style
-  MODE_RHYTHM_TAPPER,  // 8-drum rhythm game style
-  MODE_ARPEGGIATOR,    // Auto-arpeggiating chords
-  MODE_STEP_SEQ,       // Auto-looping step sequencer
-  MODE_DUAL_LOOP,      // Dual-hand layered looper (melody + drums)
-  MODE_CHORD_JAM,      // Left hand picks chords, right hand strums
   MODE_DRONE_SOLO,     // Left hand drone, right hand melody
-  MODE_RAIN_MODE,      // Falling notes caught by hands
-  MODE_BASS_MACHINE,   // Looping bass line with filter sweep
-  MODE_ECHO_DELAY,     // Notes with auto echo/repeat
-  MODE_BATTLE_MODE,    // Two player dueling melodies
-  MODE_LED_TEST
+  // ---- Broken, fix in progress ('!' prefix on OLED) ----
+  MODE_DUAL_THEREMIN,  // Right voice audio dead
+  MODE_RHYTHM_TAPPER,  // Input lag
+  MODE_ECHO_DELAY,     // Right side frozen, half LEDs stuck pink
+  // ---- Calibration / diagnostic tools ----
+  MODE_LED_TEST,
+  MODE_CALIB_SERIAL_CH0,  // Calibration: print CH0 8x8 grid to serial monitor
+  MODE_CALIB_SERIAL_CH1,  // Calibration: print CH1 8x8 grid to serial monitor
+  // ---- Deprecated (pending removal; '*' prefix on OLED) ----
+  MODE_RAIN_MODE,         // Falling notes caught by hands
+  MODE_STEP_SEQ,          // Auto-looping step sequencer
+  MODE_ARPEGGIATOR,       // Auto-arpeggiating chords
+  MODE_DISTANCE_SENSOR    // Raw 8x8 grid view (now covered by UNDER THE HOOD)
 };
+
+// Cycle bounds (kept in sync with the enum order). When the enum is
+// reordered, update these two so the encoder and 'M' command wrap correctly.
+// NOTE: MODE_LAST currently stops the menu at BATTLE so only the 6 headline
+// modes are reachable from the encoder. All later enum values still exist
+// and still work if selected programmatically -- they are just hidden from
+// the menu cycle. Move MODE_LAST back to MODE_DISTANCE_SENSOR to re-expose.
+#define MODE_FIRST  MODE_BACKSTAGE
+#define MODE_LAST   MODE_BATTLE_MODE
 
 enum ScaleType {
   SCALE_PENTATONIC,
@@ -133,7 +148,7 @@ AudioConnection          patchCord9(mixer1, 0, i2s1, 1);    // Right
 // ============================================================================
 
 // Play mode and settings
-PlayMode currentMode = MODE_STRING_THEREMIN;
+PlayMode currentMode = MODE_BACKSTAGE;
 ScaleType currentScale = SCALE_PENTATONIC;
 bool muteIfIdle = false;
 bool vibratoEnabled = false;
@@ -435,6 +450,7 @@ void updateLEDsFromSensorRow(uint8_t channel, uint8_t row);
 void updateLEDsFromFullGrid(uint8_t channel);
 int xyToLEDIndex(int row, int col);
 void setupOLED();
+void showLoadingScreen(const char* label, int step, int total);
 void updateOLEDDisplay();
 void handleEncoder();
 void handleEncoderButton();
@@ -454,45 +470,71 @@ void setup() {
 
   Serial.println("\n=== Teensy Touchless Instrument (Simulated ToF) ===");
 
-  // IMPORTANT: AudioMemory allocates memory for audio processing
-  // Each block is 128 samples. More complex patches need more memory.
+  // ---- Step 1/6: Audio engine ----
+  // AudioMemory must be allocated before any AudioStream objects run.
   AudioMemory(20);
-
-  // Initialize the audio shield
   sgtl5000_1.enable();
-
-  // Set volume (0.0 to 1.0) - moderate level
   sgtl5000_1.volume(masterVolume);
-
-  // Configure mixer gains (use masterVolume so startup respects volume setting)
   mixer1.gain(0, 0.8 * masterVolume);  // String voice
   mixer1.gain(1, 0.8 * masterVolume);  // Kick drum
   mixer1.gain(2, 0.7 * masterVolume);  // Snare drum
   mixer1.gain(3, 0.5 * masterVolume);  // Hi-hat
-
-  // Setup audio objects
   setupAudio();
-
-  // Setup LEDs
-  setupLEDs();
-
-  // Setup OLED display
-  setupOLED();
-
-  // Setup encoder button pin
-  pinMode(ENCODER_BUTTON, INPUT_PULLUP);
-
   Serial.println("Audio system initialized!");
-  Serial.println("LED system initialized!");
+
+  // ---- Step 2/6: OLED (bring up early so we can show progress) ----
+  setupOLED();
   Serial.println("OLED display initialized!");
+  showLoadingScreen("Audio", 1, 6);
+  delay(150);
+  showLoadingScreen("OLED", 2, 6);
+  delay(150);
+
+  // ---- Step 3/6: LED matrices ----
+  showLoadingScreen("LEDs", 3, 6);
+  setupLEDs();
+  Serial.println("LED system initialized!");
+  delay(150);
+
+  // ---- Step 4/6: Rotary encoder ----
+  showLoadingScreen("Encoder", 4, 6);
+  pinMode(ENCODER_BUTTON, INPUT_PULLUP);
   Serial.println("Rotary encoder initialized!");
+  delay(150);
+
+  // ---- Step 5/6: VL53L5CX CH0 (left hand sensor on Wire) ----
+  showLoadingScreen("Sensor CH0", 5, 6);
+  Serial.println("Initializing VL53L5CX CH0 (I2C0)...");
+  sensor_ch0_initialized = initDistanceSensor(0);
+  Serial.println(sensor_ch0_initialized ? "   CH0 initialization SUCCESS" : "   CH0 initialization FAILED");
+
+  // ---- Step 6/6: VL53L5CX CH1 (right hand sensor on Wire1) ----
+  showLoadingScreen("Sensor CH1", 6, 6);
+  Serial.println("Initializing VL53L5CX CH1 (I2C1)...");
+  sensor_ch1_initialized = initDistanceSensor(1);
+  Serial.println(sensor_ch1_initialized ? "   CH1 initialization SUCCESS" : "   CH1 initialization FAILED");
+
+  // Brief "Ready!" flash before normal UI takes over
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(40, 0);
+  display.println("AURA");
+  display.setTextSize(2);
+  const char* ready = "Ready!";
+  int readyW = strlen(ready) * 12;  // size-2 font ~ 12 px per char
+  display.setCursor((128 - readyW) / 2, 28);
+  display.println(ready);
+  display.display();
+  delay(500);
+
   Serial.println("Mode: STRING THEREMIN");
   Serial.println();
   printHelp();
 
   lastUpdateTime = millis();
 
-  // Initial display update
+  // Normal display takes over
   updateOLEDDisplay();
 }
 
@@ -597,6 +639,141 @@ void loop() {
           }
         }
       }
+    } else if (currentMode == MODE_CALIB_SERIAL_CH0) {
+      // Calibration: stream CH0 grid to serial monitor only
+      if (currentTime - lastSensorRead >= SENSOR_READ_INTERVAL) {
+        lastSensorRead = currentTime;
+        if (sensor_ch0_initialized) {
+          readDistanceGrid(0);
+          printDistanceGrid(0);
+        }
+      }
+    } else if (currentMode == MODE_CALIB_SERIAL_CH1) {
+      // Calibration: stream CH1 grid to serial monitor only
+      if (currentTime - lastSensorRead >= SENSOR_READ_INTERVAL) {
+        lastSensorRead = currentTime;
+        if (sensor_ch1_initialized) {
+          readDistanceGrid(1);
+          printDistanceGrid(1);
+        }
+      }
+    } else if (currentMode == MODE_BACKSTAGE) {
+      // Diagnostic: render BOTH sensor grids simultaneously. CH0 -> LEFT
+      // matrix, CH1 -> RIGHT matrix. Rotation is handled inside
+      // readDistanceGrid(), so grid[row][col] already matches the user-facing
+      // orientation of each LED matrix.
+      if (currentTime - lastSensorRead >= SENSOR_READ_INTERVAL) {
+        lastSensorRead = currentTime;
+        if (sensor_ch0_initialized) readDistanceGrid(0);
+        if (sensor_ch1_initialized) readDistanceGrid(1);
+        for (int row = 0; row < MATRIX_HEIGHT; row++) {
+          for (int col = 0; col < MATRIX_WIDTH; col++) {
+            int ledIndex = xyToLEDIndex(row, col);
+            leds[ledIndex]   = sensor_ch0_initialized
+                                 ? distanceToColor(distanceGrid_ch0[row][col])
+                                 : CRGB::Black;
+            leds_r[ledIndex] = sensor_ch1_initialized
+                                 ? distanceToColor(distanceGrid_ch1[row][col])
+                                 : CRGB::Black;
+          }
+        }
+        FastLED.show();
+      }
+    } else if (currentMode == MODE_BACKSTAGE_2) {
+      // LED-only animation. No sensors used. Left matrix = small pulsing
+      // heart with an EKG trace scrolling through its middle row. Right
+      // matrix = rainbow "AURA TSA 2026" text scrolling right-to-left.
+      // Both animations share an 80 ms tick so the EKG and text scroll
+      // together. Right matrix is physically column-mirrored, so its
+      // column index is flipped at render time.
+      static uint32_t lastFrame = 0;
+      static uint16_t scrollPos = 0;
+      if (currentTime - lastFrame >= 80) {
+        lastFrame = currentTime;
+        scrollPos++;
+
+        // ---- LEFT: small heart (6x5) centered + scrolling EKG ----
+        static const uint8_t heart[5][6] = {
+          {1,1,0,0,1,1},
+          {1,1,1,1,1,1},
+          {1,1,1,1,1,1},
+          {0,1,1,1,1,0},
+          {0,0,1,1,0,0}
+        };
+        // PQRST waveform sampled every column. Lower row = higher up on
+        // the matrix. Baseline = 4, P=3, Q=5, R=1 (spike), S=6, T=3.
+        static const int8_t ekgPattern[16] =
+          {4,4,3,3,4,5,1,6,4,3,3,4,4,4,4,4};
+        const int EKG_LEN = 16;
+
+        float phase = (currentTime % 1400) / 1400.0f;
+        float s = (sin(phase * 2.0f * PI) + 1.0f) * 0.5f;
+        uint8_t heartBright = 35 + (uint8_t)(55.0f * s);  // 35..90 dim red
+
+        for (int row = 0; row < 8; row++) {
+          for (int col = 0; col < 8; col++) {
+            bool isHeart = (row >= 2 && row <= 6 && col >= 1 && col <= 6)
+                             && heart[row - 2][col - 1];
+            leds[xyToLEDIndex(row, col)] =
+              isHeart ? CRGB(heartBright, 0, 0) : CRGB::Black;
+          }
+        }
+        // Overlay EKG as connected vertical segments; rightmost col is
+        // newest sample (brightest), older cols fade toward the left.
+        for (int c = 0; c < 8; c++) {
+          int patternCol = (scrollPos + c) % EKG_LEN;
+          int prevCol    = (patternCol + EKG_LEN - 1) % EKG_LEN;
+          int waveRow = ekgPattern[patternCol];
+          int prevRow = ekgPattern[prevCol];
+          uint8_t b = 50 + c * 29;  // 50..253
+          CRGB color = CRGB(b, b / 6, b / 6);
+          int r1 = min(prevRow, waveRow);
+          int r2 = max(prevRow, waveRow);
+          for (int r = r1; r <= r2; r++) {
+            leds[xyToLEDIndex(r, c)] = color;
+          }
+        }
+
+        // ---- RIGHT: rainbow scrolling "AURA TSA 2026" ----
+        // 5-wide x 7-tall column-major font. Bit 0 = top row of glyph.
+        static const uint8_t font[][5] = {
+          {0x7E, 0x09, 0x09, 0x09, 0x7E},  // 0: A
+          {0x3F, 0x40, 0x40, 0x40, 0x3F},  // 1: U
+          {0x7F, 0x09, 0x19, 0x29, 0x46},  // 2: R
+          {0x01, 0x01, 0x7F, 0x01, 0x01},  // 3: T
+          {0x46, 0x49, 0x49, 0x49, 0x31},  // 4: S
+          {0x00, 0x00, 0x00, 0x00, 0x00},  // 5: space
+          {0x42, 0x61, 0x51, 0x49, 0x46},  // 6: 2
+          {0x3E, 0x51, 0x49, 0x45, 0x3E},  // 7: 0
+          {0x3E, 0x49, 0x49, 0x49, 0x30}   // 8: 6
+        };
+        // Message "AURA TSA 2026" -> font indices
+        static const uint8_t msgIdx[] = {0,1,2,0,5,3,4,0,5,6,7,6,8};
+        const int MSG_CHARS = 13;
+        const int CHAR_W   = 6;                   // 5 glyph cols + 1 spacer
+        const int TEXT_LEN = MSG_CHARS * CHAR_W;  // 78
+        const int LOOP_LEN = TEXT_LEN + 16;       // blank gap between loops
+        int textScroll = scrollPos % LOOP_LEN;
+
+        for (int c = 0; c < 8; c++) {
+          int physCol = 7 - c;  // right matrix is physically mirrored
+          int textCol = (textScroll + physCol) % LOOP_LEN;
+          uint8_t colBits = 0;
+          if (textCol < TEXT_LEN) {
+            int charIdx   = textCol / CHAR_W;
+            int colInChar = textCol % CHAR_W;
+            if (colInChar < 5) colBits = font[msgIdx[charIdx]][colInChar];
+          }
+          uint8_t hue = (uint8_t)(textCol * 8);
+          CRGB on = CHSV(hue, 255, 200);
+          for (int row = 0; row < 8; row++) {
+            bool lit = (row < 7) && ((colBits >> row) & 1);
+            leds_r[xyToLEDIndex(row, c)] = lit ? on : CRGB::Black;
+          }
+        }
+
+        FastLED.show();
+      }
     }
     // Drum mode is event-driven (no continuous update needed)
   }
@@ -676,44 +853,12 @@ void printHelp() {
 
 void handleCommand(char c) {
   switch (c) {
-    // Mode toggle - cycle through all modes
+    // Mode toggle - cycle through all modes (enum order, wraps at MODE_LAST)
     case 'M':
       {
-        PlayMode nextMode;
-        if (currentMode == MODE_STRING_THEREMIN) {
-          nextMode = MODE_DISTANCE_SENSOR;
-        } else if (currentMode == MODE_DISTANCE_SENSOR) {
-          nextMode = MODE_DUAL_THEREMIN;
-        } else if (currentMode == MODE_DUAL_THEREMIN) {
-          nextMode = MODE_DUAL_PIANO;
-        } else if (currentMode == MODE_DUAL_PIANO) {
-          nextMode = MODE_GRID_SEQUENCER;
-        } else if (currentMode == MODE_GRID_SEQUENCER) {
-          nextMode = MODE_RHYTHM_TAPPER;
-        } else if (currentMode == MODE_RHYTHM_TAPPER) {
-          nextMode = MODE_ARPEGGIATOR;
-        } else if (currentMode == MODE_ARPEGGIATOR) {
-          nextMode = MODE_STEP_SEQ;
-        } else if (currentMode == MODE_STEP_SEQ) {
-          nextMode = MODE_DUAL_LOOP;
-        } else if (currentMode == MODE_DUAL_LOOP) {
-          nextMode = MODE_CHORD_JAM;
-        } else if (currentMode == MODE_CHORD_JAM) {
-          nextMode = MODE_DRONE_SOLO;
-        } else if (currentMode == MODE_DRONE_SOLO) {
-          nextMode = MODE_RAIN_MODE;
-        } else if (currentMode == MODE_RAIN_MODE) {
-          nextMode = MODE_BASS_MACHINE;
-        } else if (currentMode == MODE_BASS_MACHINE) {
-          nextMode = MODE_ECHO_DELAY;
-        } else if (currentMode == MODE_ECHO_DELAY) {
-          nextMode = MODE_BATTLE_MODE;
-        } else if (currentMode == MODE_BATTLE_MODE) {
-          nextMode = MODE_LED_TEST;
-        } else {
-          nextMode = MODE_STRING_THEREMIN;
-        }
-        switchToMode(nextMode);
+        int nextMode = (int)currentMode + 1;
+        if (nextMode > MODE_LAST) nextMode = MODE_FIRST;
+        switchToMode((PlayMode)nextMode);
       }
       break;
 
@@ -1815,8 +1960,16 @@ void processArpeggiator() {
     arpSpeed = map(constrain((int)rightAvg, 100, 700), 100, 700, 50, 400);
   }
 
-  // Auto-play arpeggio notes at the set speed
-  if (currentTime - lastArpNoteTime >= (unsigned long)arpSpeed) {
+  // Auto-play arpeggio notes at the set speed.
+  // Gate on hand presence so the mode is silent until the player engages.
+  bool handPresent = (leftCount > 0 || rightCount > 0);
+  if (!handPresent) {
+    // No hands -> kill any sustaining note and skip the auto-play tick.
+    if (noteActive) {
+      stringEnvelope.noteOff();
+      noteActive = false;
+    }
+  } else if (currentTime - lastArpNoteTime >= (unsigned long)arpSpeed) {
     lastArpNoteTime = currentTime;
 
     // Define chord intervals (semitones from root)
@@ -1948,20 +2101,31 @@ void processStepSequencer() {
   // Read left sensor for pattern editing
   if (sensor_ch0_initialized) readDistanceGrid(0);
 
-  // Check for zone touches to toggle pattern
+  // Check for zone touches to toggle pattern.
+  // A flat hand covers many cells at once, so we toggle ONLY the single
+  // closest newly-touched cell per frame -- prevents 'sweeping' a dozen
+  // toggles in one gesture. Per-cell debounce still applies.
+  int toggleRow = -1, toggleCol = -1;
+  uint16_t minDist = 0xFFFF;
   for (int row = 0; row < 8; row++) {
     for (int col = 0; col < 8; col++) {
       uint16_t dist = distanceGrid_ch0[row][col];
       bool isTouched = (dist < GRID_ZONE_THRESHOLD && dist > 50);
       bool wasTouched = gridZoneActive[row][col];
 
-      // Toggle on new touch
       if (isTouched && !wasTouched && (currentTime - gridZoneLastTrigger[row][col]) > 150) {
-        stepGrid[col][row] = !stepGrid[col][row];  // col=step, row=instrument
-        gridZoneLastTrigger[row][col] = currentTime;
+        if (dist < minDist) {
+          minDist = dist;
+          toggleRow = row;
+          toggleCol = col;
+        }
       }
       gridZoneActive[row][col] = isTouched;
     }
+  }
+  if (toggleRow >= 0) {
+    stepGrid[toggleCol][toggleRow] = !stepGrid[toggleCol][toggleRow];  // col=step, row=instrument
+    gridZoneLastTrigger[toggleRow][toggleCol] = currentTime;
   }
 
   // Read right sensor for tempo control
@@ -2017,13 +2181,16 @@ void processStepSequencer() {
     stepPosition = (stepPosition + 1) % 8;
   }
 
-  // LED visualization - BOTH matrices show grid pattern with playhead
+  // LED visualization - BOTH matrices show grid pattern with playhead.
+  // stepPosition was already advanced past the just-played step, so the
+  // visible playhead must point to the step that is currently sounding.
   if (ledVisualizationEnabled) {
+    int playheadCol = (stepPosition + 7) % 8;
     for (int row = 0; row < 8; row++) {
       for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
         CRGB color;
-        if (col == stepPosition) {
+        if (col == playheadCol) {
           color = stepGrid[col][row] ? CRGB::White : CRGB(30, 30, 0);
         } else if (stepGrid[col][row]) {
           uint8_t hue = row * 32;
@@ -2173,111 +2340,163 @@ void processDualLoop() {
 }
 
 void processChordJam() {
-  // CHORD JAM: Left hand picks chord (I, IV, V, vi), right hand strums
-  // Chord definitions in C major: I=CEG, IV=FAC, V=GBD, vi=ACE
-  static const int chords[4][3] = {
-    {60, 64, 67},  // I  = C E G
-    {65, 69, 72},  // IV = F A C5
-    {67, 71, 74},  // V  = G B D5
-    {69, 72, 76}   // vi = A C5 E5
+  // CHORD JAM (guitar model):
+  //   Left sensor  = FRETBOARD. 4 "strings", each = a pair of LED rows
+  //     (rows 0-1, 2-3, 4-5, 6-7). A string is FRETTED when any cell in its
+  //     2-row strip is touched; the whole strip lights up in that string's color.
+  //   Right sensor = SOUNDHOLE. A lateral swipe ("strum") plays the next
+  //     fretted string in the swipe direction. Holding multiple strings and
+  //     strumming several times in a row = arpeggiated chord (Karplus-Strong
+  //     decay tails overlap so it sounds like a chord, not a sequence).
+  //   No fretted strings = muted, just like palming the strings on a real guitar.
+  static const int stringNotes[4] = {52, 57, 62, 67};  // E3, A3, D4, G4
+  static const CRGB stringColors[4] = {
+    CRGB(255,  60,  40),  // string 0 - red    (E)
+    CRGB(255, 180,   0),  // string 1 - amber  (A)
+    CRGB( 40, 255,  80),  // string 2 - green  (D)
+    CRGB( 60, 140, 255),  // string 3 - blue   (G)
   };
-  static const char* chordNames[4] = {"I (C)", "IV (F)", "V (G)", "vi (Am)"};
+
+  // Strum is now a VERTICAL motion: how fast the hand moves up/down over the
+  // soundhole sensor. Moving DOWN toward the sensor (distance shrinking) is a
+  // downstroke; moving UP away (distance growing) is an upstroke.
+  const float STRUM_VELOCITY_THRESHOLD = 25.0;  // mm change per frame to count
+
+  static float prevStrumDist = -1.0f;
+  static int   lastStrummedString = -1;
 
   unsigned long currentTime = millis();
-
-  // Read both sensors
   if (sensor_ch0_initialized) readDistanceGrid(0);
   if (sensor_ch1_initialized) readDistanceGrid(1);
 
-  // --- LEFT HAND: Select chord by quadrant ---
-  float leftAvg = 0;
-  int leftCount = 0;
-  int leftQuadrant = -1;  // Which 2-row section hand is in
-  float closestDist = 9999;
-
-  for (int row = 0; row < 8; row++) {
+  // --- LEFT HAND: pick a single string = the row-pair the hand has
+  // REACHED FURTHEST across the fretboard. Strings are laid out from the
+  // player's POV: string 0 (low E) at the far side (rows 6-7), string 3
+  // (high G) at the near side (rows 0-1). Hovering over the near rows alone
+  // selects string 0; reaching further selects strings 1, 2, 3 in turn.
+  bool stringFretted[4] = {false, false, false, false};
+  int highestFretted = -1;
+  for (int s = 0; s < 4; s++) {
+    int row1 = (3 - s) * 2;       // string 0 -> rows 6,7 ; string 3 -> rows 0,1
+    int row2 = (3 - s) * 2 + 1;
     for (int col = 0; col < 8; col++) {
-      uint16_t d = distanceGrid_ch0[row][col];
-      if (d < GRID_ZONE_THRESHOLD && d > 50) {
-        leftAvg += d;
-        leftCount++;
-        if (d < closestDist) {
-          closestDist = d;
-          leftQuadrant = row / 2;  // 0-3 for 4 chords
-        }
+      uint16_t d1 = distanceGrid_ch0[row1][col];
+      uint16_t d2 = distanceGrid_ch0[row2][col];
+      if ((d1 > 50 && d1 < GRID_ZONE_THRESHOLD) ||
+          (d2 > 50 && d2 < GRID_ZONE_THRESHOLD)) {
+        highestFretted = s;  // keep overwriting; final value = string reached furthest
+        break;
       }
     }
   }
+  if (highestFretted >= 0) stringFretted[highestFretted] = true;
 
-  if (leftCount > 3 && leftQuadrant >= 0 && leftQuadrant < 4) {
-    if (leftQuadrant != chordJamIndex) {
-      chordJamIndex = leftQuadrant;
-      Serial.print(">> Chord: ");
-      Serial.println(chordNames[chordJamIndex]);
-    }
-  }
-
-  // --- RIGHT HAND: Strum detection (swipe = many zones changing fast) ---
-  int rightActiveCount = 0;
+  // --- RIGHT HAND: detect strum (vertical motion velocity) ---
   float rightAvgDist = 0;
+  int rightCentroidX = 0, rightCentroidY = 0, rightZones = 0;
+  calculateHandMetrics(distanceGrid_ch1, rightAvgDist, rightCentroidX, rightCentroidY, rightZones);
 
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t d = distanceGrid_ch1[row][col];
-      if (d < GRID_ZONE_THRESHOLD && d > 50) {
-        rightActiveCount++;
-        rightAvgDist += d;
+  bool strum = false;
+  int strumDir = +1;  // +1 = downstroke (hand moving toward sensor)
+  if (rightZones > 0) {
+    if (prevStrumDist < 0) {
+      strum = true;          // hand just arrived = automatic single pluck
+      strumDir = +1;
+    } else {
+      float dd = rightAvgDist - prevStrumDist;  // +ve = hand rising, -ve = falling
+      if (dd <= -STRUM_VELOCITY_THRESHOLD && (currentTime - chordJamLastStrum) > 100) {
+        strum = true;  strumDir = +1;   // downstroke (hand swinging down)
+      } else if (dd >= STRUM_VELOCITY_THRESHOLD && (currentTime - chordJamLastStrum) > 100) {
+        strum = true;  strumDir = -1;   // upstroke (hand swinging up)
       }
     }
+    prevStrumDist = rightAvgDist;
+  } else {
+    prevStrumDist = -1.0f;
   }
 
-  if (rightActiveCount > 0) rightAvgDist /= rightActiveCount;
+  // --- Fire next fretted string in the strum direction ---
+  if (strum) {
+    int playString = -1;
+    if (lastStrummedString < 0) {
+      // No history: scan from the appropriate end so first strum picks the
+      // bottom-most (or top-most) currently-fretted string.
+      int start = (strumDir > 0) ? 0 : 3;
+      for (int i = 0; i < 4; i++) {
+        int s = (strumDir > 0) ? (start + i) : (start - i);
+        if (stringFretted[s]) { playString = s; break; }
+      }
+    } else {
+      // Walk to the next fretted string in the strum direction, wrapping around.
+      for (int i = 1; i <= 4; i++) {
+        int s = ((lastStrummedString + strumDir * i) % 4 + 4) % 4;
+        if (stringFretted[s]) { playString = s; break; }
+      }
+    }
 
-  // Strum triggers when enough zones are touched (hand sweep)
-  if (rightActiveCount > 6 && (currentTime - chordJamLastStrum) > 120) {
-    chordJamLastStrum = currentTime;
-
-    // Velocity based on distance (closer = louder)
-    float velocity = constrain(1.0 - (rightAvgDist / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
-
-    // Play all 3 notes of the chord rapidly (strum effect)
-    for (int i = 0; i < 3; i++) {
-      float freq = 440.0 * pow(2.0, (chords[chordJamIndex][i] - 69) / 12.0);
-      stringFilter.frequency(freq * 2.5);
-      stringFilter.resonance(1.5);
+    if (playString >= 0) {
+      float freq = 440.0 * pow(2.0, (stringNotes[playString] - 69) / 12.0);
+      float coverage = (float)rightZones / 64.0;
+      float velocity = constrain(0.4 + coverage * 0.6, 0.3, 1.0);
+      stringFilter.frequency(freq * 3.0);
+      stringFilter.resonance(2.0);
       stringVoice.noteOn(freq, velocity);
       stringEnvelope.noteOn();
+      mixer1.gain(0, 0.7 * masterVolume);
       noteActive = true;
-      mixer1.gain(0, velocity * masterVolume);
+      lastStrummedString = playString;
+      chordJamIndex = playString;
+      chordJamLastStrum = currentTime;
     }
   }
 
   // --- LED VISUALIZATION ---
   if (ledVisualizationEnabled) {
     clearAllLEDs();
-    // Left matrix: show which chord is selected (rows 0-1=I, 2-3=IV, 4-5=V, 6-7=vi)
-    for (int row = 0; row < 8; row++) {
-      int chordGroup = row / 2;
+
+    // LEFT matrix: 4 strings as 2-row strips. Whole strip lit if fretted;
+    // briefly flash the string that was just strummed.
+    for (int s = 0; s < 4; s++) {
+      CRGB color = stringColors[s];
+      if (!stringFretted[s]) color.nscale8(25);  // dim baseline
+      if (lastStrummedString == s && (currentTime - chordJamLastStrum) < 250) {
+        uint8_t flash = 255 - ((currentTime - chordJamLastStrum) * 255 / 250);
+        color = stringColors[s];
+        color.r = qadd8(color.r, flash);
+        color.g = qadd8(color.g, flash / 2);
+        color.b = qadd8(color.b, flash / 2);
+      }
+      int row1 = (3 - s) * 2, row2 = (3 - s) * 2 + 1;  // flipped to match player POV
       for (int col = 0; col < 8; col++) {
-        int ledIndex = row * 8 + col;
-        if (chordGroup == chordJamIndex) {
-          uint8_t hue = chordGroup * 60;
-          leds[ledIndex] = CHSV(hue, 255, 200);
-        } else {
-          uint8_t hue = chordGroup * 60;
-          leds[ledIndex] = CHSV(hue, 255, 30);
-        }
+        leds[row1 * 8 + col] = color;
+        leds[row2 * 8 + col] = color;
       }
     }
-    // Right matrix: strum intensity
-    int strumBrightness = 0;
+
+    // RIGHT matrix: yellow horizontal BAR tracks the strum hand's height
+    // (closer to sensor = lower row, farther = higher row). Whole matrix
+    // flashes amber when a strum just fired.
+    int strumFlash = 0;
     if (currentTime - chordJamLastStrum < 200) {
-      strumBrightness = 255 - ((currentTime - chordJamLastStrum) * 255 / 200);
+      strumFlash = 255 - ((currentTime - chordJamLastStrum) * 255 / 200);
+    }
+    // Map current right-hand distance to a row index 0..7
+    int strumRow = -1;
+    if (rightZones > 0) {
+      float clamped = constrain(rightAvgDist, 60.0f, 400.0f);
+      float t = (clamped - 60.0f) / (400.0f - 60.0f);
+      strumRow = constrain((int)(t * 7.99f), 0, 7);
     }
     for (int row = 0; row < 8; row++) {
       for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
-        leds_r[ledIndex] = CRGB(strumBrightness, strumBrightness / 2, 0);
+        if (row == strumRow) {
+          leds_r[ledIndex] = CRGB(220, 220, 80);  // bright yellow strum bar
+        } else if (strumFlash > 0) {
+          leds_r[ledIndex] = CRGB(strumFlash / 4, strumFlash / 6, 0);
+        } else {
+          leds_r[ledIndex] = CRGB(8, 6, 0);
+        }
       }
     }
     FastLED.show();
@@ -2285,31 +2504,48 @@ void processChordJam() {
 }
 
 void processDroneSolo() {
-  // DRONE + SOLO: Left hand = continuous drone, Right hand = melody notes
+  // DRONE + SOLO (hybrid control model):
+  //   Left hand  : height (avg distance) -> drone note; sustains while present.
+  //   Right hand : height -> pitch, lateral swipe -> trigger, coverage -> velocity.
   static const int droneNotes[8] = {36, 38, 40, 41, 43, 45, 47, 48};
-  static const int soloNotes[8] = {60, 62, 64, 65, 67, 69, 71, 72};
+  static const int soloNotes[8]  = {60, 62, 64, 65, 67, 69, 71, 72};
+
+  // Narrower distance window than DUAL_DIST_* so small hand motions
+  // produce audible / visible changes. Max capped at 250 mm so a high
+  // hand on one sensor doesn't spill into the other sensor's field.
+  const float DRONE_DIST_MIN = 60.0;
+  const float DRONE_DIST_MAX = 250.0;
+
+  // Swipe detection state
+  static int prevSoloCentroidX = -1;
+  static unsigned long lastSwipeFire = 0;
+  // Smoothed continuous "level" (0..8) for buttery LED motion between note quanta
+  static float leftLevelSmooth = 0;
+  static float rightLevelSmooth = 0;
 
   unsigned long currentTime = millis();
 
   if (sensor_ch0_initialized) readDistanceGrid(0);
   if (sensor_ch1_initialized) readDistanceGrid(1);
 
-  // --- LEFT HAND: Drone note selection ---
-  int droneRow = -1;
-  float droneDist = 9999;
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t d = distanceGrid_ch0[row][col];
-      if (d < GRID_ZONE_THRESHOLD && d > 50 && d < droneDist) {
-        droneDist = d;
-        droneRow = row;
-      }
-    }
-  }
+  float leftAvgDist = 0, rightAvgDist = 0;
+  int leftCentroidX = 0, leftCentroidY = 0, leftZones = 0;
+  int rightCentroidX = 0, rightCentroidY = 0, rightZones = 0;
+  calculateHandMetrics(distanceGrid_ch0, leftAvgDist, leftCentroidX, leftCentroidY, leftZones);
+  calculateHandMetrics(distanceGrid_ch1, rightAvgDist, rightCentroidX, rightCentroidY, rightZones);
 
-  if (droneRow >= 0) {
-    float newDroneFreq = 440.0 * pow(2.0, (droneNotes[droneRow] - 69) / 12.0);
-    droneFreq = droneFreq * 0.9 + newDroneFreq * 0.1;
+  // --- LEFT HAND: Drone (height -> pitch, sustains while hand present) ---
+  int droneIdx = -1;
+  float leftLevel = 0;  // continuous 0..8 for LED bar
+  if (leftZones > 0) {
+    float normDist = constrain(leftAvgDist, DRONE_DIST_MIN, DRONE_DIST_MAX);
+    float factor = (normDist - DRONE_DIST_MIN) / (DRONE_DIST_MAX - DRONE_DIST_MIN);
+    leftLevel = factor * 8.0;
+    droneIdx = constrain((int)(factor * 7.99), 0, 7);
+
+    float newDroneFreq = 440.0 * pow(2.0, (droneNotes[droneIdx] - 69) / 12.0);
+    // Snappier response (was 0.9/0.1 -> sluggish)
+    droneFreq = droneFreq * 0.7 + newDroneFreq * 0.3;
     if (!droneActive) {
       stringVoice.noteOn(droneFreq, 0.5);
       stringEnvelope.noteOn();
@@ -2323,56 +2559,97 @@ void processDroneSolo() {
     }
     mixer1.gain(0, 0.5 * masterVolume);
   } else {
-    if (droneActive) droneActive = false;
-  }
-
-  // --- RIGHT HAND: Solo melody ---
-  int soloRow = -1;
-  float soloDist = 9999;
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t d = distanceGrid_ch1[row][col];
-      if (d < GRID_ZONE_THRESHOLD && d > 50 && d < soloDist) {
-        soloDist = d;
-        soloRow = row;
-      }
+    if (droneActive) {
+      stringEnvelope.noteOff();
+      droneActive = false;
     }
   }
+  leftLevelSmooth = leftLevelSmooth * 0.6 + leftLevel * 0.4;
 
-  if (soloRow >= 0 && soloRow != soloLastNote && (currentTime - soloLastTrigger) > 60) {
-    soloLastNote = soloRow;
-    soloLastTrigger = currentTime;
-    float soloFreq = 440.0 * pow(2.0, (soloNotes[soloRow] - 69) / 12.0);
-    snareDrum.frequency(soloFreq);
-    snareDrum.noteOn();
-    mixer1.gain(2, 0.6 * masterVolume);
-  } else if (soloRow < 0) {
+  // --- RIGHT HAND: Solo (height -> pitch, swipe -> trigger, coverage -> velocity) ---
+  int soloIdx = -1;
+  float rightLevel = 0;
+  if (rightZones > 0) {
+    float normDist = constrain(rightAvgDist, DRONE_DIST_MIN, DRONE_DIST_MAX);
+    float factor = (normDist - DRONE_DIST_MIN) / (DRONE_DIST_MAX - DRONE_DIST_MIN);
+    rightLevel = factor * 8.0;
+    soloIdx = constrain((int)(factor * 7.99), 0, 7);
+
+    // Trigger: lateral swipe (centroid X moved >= 2 cells) OR fresh hand arrival.
+    bool fire = false;
+    if (prevSoloCentroidX < 0) {
+      fire = true;  // hand just appeared
+    } else {
+      int dx = rightCentroidX - prevSoloCentroidX;
+      if (dx < 0) dx = -dx;
+      if (dx >= 2 && (currentTime - lastSwipeFire) > 80) fire = true;
+    }
+
+    if (fire) {
+      // Coverage -> velocity (bigger swipe = louder note)
+      float coverage = (float)rightZones / 64.0;
+      float velocity = constrain(0.35 + coverage * 0.65, 0.3, 1.0);
+
+      float soloFreq = 440.0 * pow(2.0, (soloNotes[soloIdx] - 69) / 12.0);
+      // Melodic snareDrum config (safety net - also set in mode-enter)
+      snareDrum.length(500);
+      snareDrum.secondMix(0.0);
+      snareDrum.pitchMod(0.0);
+      snareDrum.frequency(soloFreq);
+      snareDrum.noteOn();
+      mixer1.gain(2, velocity * masterVolume);
+      lastSwipeFire = currentTime;
+      soloLastNote = soloIdx;
+      soloLastTrigger = currentTime;
+    }
+    prevSoloCentroidX = rightCentroidX;
+  } else {
+    prevSoloCentroidX = -1;
     soloLastNote = -1;
   }
+  rightLevelSmooth = rightLevelSmooth * 0.6 + rightLevel * 0.4;
 
-  // --- LED VISUALIZATION ---
+  // --- LED VISUALIZATION (continuous height bar + centroid indicator) ---
   if (ledVisualizationEnabled) {
     clearAllLEDs();
-    // Left matrix: drone visualization
+    // Helper: continuous bar fill for both matrices. Each row fades from base
+    // dim color up to a bright top "tip" that tracks hand height smoothly.
+    uint8_t pulse = 128 + 127 * sin(currentTime / 200.0);
+
+    // LEFT matrix - drone bar (teal/cyan, pulses)
     for (int row = 0; row < 8; row++) {
+      // How "filled" is this row? 1.0 if fully below the level, fractional at the top
+      float fill = constrain(leftLevelSmooth - row, 0.0f, 1.0f);
+      uint8_t brightness = (uint8_t)(fill * pulse);
       for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
-        if (droneRow >= 0 && row == droneRow) {
-          uint8_t pulse = 128 + 127 * sin(currentTime / 200.0);
-          leds[ledIndex] = CRGB(0, pulse, pulse);
+        if (leftZones > 0 && brightness > 0) {
+          leds[ledIndex] = CRGB(0, brightness, brightness);
         } else {
-          leds[ledIndex] = CRGB(0, 10, 10);
+          leds[ledIndex] = CRGB(0, 6, 6);  // dim baseline
         }
       }
     }
-    // Right matrix: solo notes
+
+    // RIGHT matrix - solo bar (magenta) with centroid column highlight
     for (int row = 0; row < 8; row++) {
+      float fill = constrain(rightLevelSmooth - row, 0.0f, 1.0f);
+      uint8_t r = (uint8_t)(fill * 255);
+      uint8_t b = (uint8_t)(fill * 200);
       for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
-        if (soloRow >= 0 && row == soloRow) {
-          leds_r[ledIndex] = CRGB(255, 50, 255);
+        bool onCentroidCol = (rightZones > 0 && col == rightCentroidX);
+        if (rightZones > 0 && fill > 0) {
+          // Boost the centroid column so you SEE the X position too
+          if (onCentroidCol) {
+            leds_r[ledIndex] = CRGB(255, 255, 255);
+          } else {
+            leds_r[ledIndex] = CRGB(r, 30, b);
+          }
+        } else if (onCentroidCol) {
+          leds_r[ledIndex] = CRGB(60, 0, 60);  // faint column when below level
         } else {
-          leds_r[ledIndex] = CRGB(10, 0, 10);
+          leds_r[ledIndex] = CRGB(6, 0, 6);
         }
       }
     }
@@ -2411,52 +2688,59 @@ void processRainMode() {
     }
   }
 
-  // --- Move & catch: LEFT sensor ---
+  // --- Move & catch: independent passes for LEFT and RIGHT ---
+  // Split so a catch on one side cannot 'continue' past the other side's tick.
   if (currentTime - rainLastFall > 50) {
     rainLastFall = currentTime;
+
+    // LEFT sensor
     for (int i = 0; i < 8; i++) {
-      if (rainDropActive[i]) {
-        rainDropRow[i] += rainSpeed;
-        int dropGridRow = (int)rainDropRow[i];
-        int dropCol = rainDropNote[i];
-        if (dropGridRow >= 0 && dropGridRow < 8) {
-          uint16_t d = distanceGrid_ch0[dropGridRow][dropCol];
-          if (d < GRID_ZONE_THRESHOLD && d > 50) {
-            float freq = 440.0 * pow(2.0, (rainScaleNotes[dropCol] - 69) / 12.0);
-            float velocity = constrain(1.0 - (d / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
-            stringFilter.frequency(freq * 2.5);
-            stringFilter.resonance(1.2);
-            stringVoice.noteOn(freq, velocity);
-            stringEnvelope.noteOn();
-            noteActive = true;
-            mixer1.gain(0, velocity * masterVolume);
-            rainDropActive[i] = false;
-            continue;
-          }
+      if (!rainDropActive[i]) continue;
+      rainDropRow[i] += rainSpeed;
+      int dropGridRow = (int)rainDropRow[i];
+      int dropCol = rainDropNote[i];
+      if (dropGridRow >= 0 && dropGridRow < 8) {
+        uint16_t d = distanceGrid_ch0[dropGridRow][dropCol];
+        if (d < GRID_ZONE_THRESHOLD && d > 50) {
+          float freq = 440.0 * pow(2.0, (rainScaleNotes[dropCol] - 69) / 12.0);
+          float velocity = constrain(1.0 - (d / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
+          stringFilter.frequency(freq * 2.5);
+          stringFilter.resonance(1.2);
+          stringEnvelope.noteOff();  // release any sustaining envelope first
+          stringVoice.noteOn(freq, velocity);
+          stringEnvelope.noteOn();
+          noteActive = true;
+          mixer1.gain(0, velocity * masterVolume);
+          rainDropActive[i] = false;
+          continue;
         }
-        if (rainDropRow[i] >= 8.0) rainDropActive[i] = false;
       }
-      // RIGHT sensor
-      if (rainDropActiveR[i]) {
-        rainDropRowR[i] += rainSpeed;
-        int dropGridRow = (int)rainDropRowR[i];
-        int dropCol = rainDropNoteR[i];
-        if (dropGridRow >= 0 && dropGridRow < 8) {
-          uint16_t d = distanceGrid_ch1[dropGridRow][dropCol];
-          if (d < GRID_ZONE_THRESHOLD && d > 50) {
-            float freq = 440.0 * pow(2.0, (rainScaleNotes[dropCol] - 69) / 12.0);
-            float velocity = constrain(1.0 - (d / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
-            stringFilter.frequency(freq * 2.5);
-            stringVoice.noteOn(freq, velocity);
-            stringEnvelope.noteOn();
-            noteActive = true;
-            mixer1.gain(0, velocity * masterVolume);
-            rainDropActiveR[i] = false;
-            continue;
-          }
+      if (rainDropRow[i] >= 8.0) rainDropActive[i] = false;
+    }
+
+    // RIGHT sensor
+    for (int i = 0; i < 8; i++) {
+      if (!rainDropActiveR[i]) continue;
+      rainDropRowR[i] += rainSpeed;
+      int dropGridRow = (int)rainDropRowR[i];
+      int dropCol = rainDropNoteR[i];
+      if (dropGridRow >= 0 && dropGridRow < 8) {
+        uint16_t d = distanceGrid_ch1[dropGridRow][dropCol];
+        if (d < GRID_ZONE_THRESHOLD && d > 50) {
+          float freq = 440.0 * pow(2.0, (rainScaleNotes[dropCol] - 69) / 12.0);
+          float velocity = constrain(1.0 - (d / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
+          stringFilter.frequency(freq * 2.5);
+          stringFilter.resonance(1.2);
+          stringEnvelope.noteOff();  // release any sustaining envelope first
+          stringVoice.noteOn(freq, velocity);
+          stringEnvelope.noteOn();
+          noteActive = true;
+          mixer1.gain(0, velocity * masterVolume);
+          rainDropActiveR[i] = false;
+          continue;
         }
-        if (rainDropRowR[i] >= 8.0) rainDropActiveR[i] = false;
       }
+      if (rainDropRowR[i] >= 8.0) rainDropActiveR[i] = false;
     }
   }
 
@@ -2582,9 +2866,52 @@ void processBassMachine() {
         }
       }
     }
-    // Right matrix: filter frequency visualization (bar height = filter cutoff)
-    int filterBar = constrain((int)((bassFilterFreq / 2000.0) * 8.0), 0, 7);
-    for (int row = 7; row >= (7 - filterBar); row--) {
+    // Right matrix: chord-jam-style row-pair scan with anti-flicker.
+    //   1) Require >=2 cells per pair before counting it (kills single-cell
+    //      sensor noise that caused phantom "1-row" flickers).
+    //   2) Require 3 consecutive frames at the same raw pair before
+    //      committing it as the target (kills boundary chatter).
+    //   3) Step the displayed bar by AT MOST 1 pair per 50 ms so a hand
+    //      that lands far away grows the bar smoothly 2 -> 4 -> 6 -> 8
+    //      rather than skipping.
+    // 4 levels: 6-7 -> 4-7 -> 2-7 -> 0-7. Red-to-orange gradient preserved.
+    static int displayedPair  = 0;
+    static int targetPair     = 0;
+    static int candidatePair  = 0;
+    static int candidateFrames = 0;
+    static uint32_t lastPairStep = 0;
+    const int STABILITY_FRAMES = 3;
+    const uint32_t STEP_INTERVAL_MS = 50;
+
+    int rawPair = 0;
+    for (int p = 0; p < 4; p++) {
+      int row1 = 6 - p * 2;  // p=0 -> rows 6,7 ; p=3 -> rows 0,1
+      int row2 = row1 + 1;
+      int cellsInPair = 0;
+      for (int col = 0; col < 8; col++) {
+        uint16_t d1 = distanceGrid_ch1[row1][col];
+        uint16_t d2 = distanceGrid_ch1[row2][col];
+        if (d1 > 50 && d1 < GRID_ZONE_THRESHOLD) cellsInPair++;
+        if (d2 > 50 && d2 < GRID_ZONE_THRESHOLD) cellsInPair++;
+      }
+      if (cellsInPair >= 2) rawPair = p;
+    }
+
+    if (rawPair == candidatePair) {
+      if (candidateFrames < STABILITY_FRAMES) candidateFrames++;
+      if (candidateFrames >= STABILITY_FRAMES) targetPair = candidatePair;
+    } else {
+      candidatePair = rawPair;
+      candidateFrames = 1;
+    }
+
+    if (currentTime - lastPairStep >= STEP_INTERVAL_MS) {
+      if (displayedPair < targetPair) { displayedPair++; lastPairStep = currentTime; }
+      else if (displayedPair > targetPair) { displayedPair--; lastPairStep = currentTime; }
+    }
+
+    int rowsLit = (displayedPair + 1) * 2;  // 2, 4, 6, or 8 rows
+    for (int row = 8 - rowsLit; row < 8; row++) {
       for (int col = 0; col < 8; col++) {
         int ledIndex = row * 8 + col;
         uint8_t hue = map(row, 0, 7, 0, 40);  // Red to orange
@@ -2924,13 +3251,15 @@ void readDistanceGrid(uint8_t channel) {
     return;
   }
 
-  // Copy distance data to our 8x8 grid
-  // VL53L5CX provides data in a 1D array of 64 elements
-  // We need to map it to our 2D [8][8] array
+  // Copy distance data to our 8x8 grid, rotating 180° so that grid[row][col]
+  // matches the user's perceived orientation (top-left as you face the device =
+  // grid[0][0]). The raw sensor frame is mounted rotated 180° relative to the
+  // LED matrices, so we flip both axes here once, at the source. Every mode
+  // downstream then sees correctly-oriented data without needing its own flip.
   for (int row = 0; row < 8; row++) {
     for (int col = 0; col < 8; col++) {
-      int index = row * 8 + col;
-      grid[row][col] = results.distance_mm[index];
+      int rawIndex = (7 - row) * 8 + (7 - col);
+      grid[row][col] = results.distance_mm[rawIndex];
     }
   }
 }
@@ -3310,6 +3639,47 @@ void setupOLED() {
   display.display();
 }
 
+void showLoadingScreen(const char* label, int step, int total) {
+  // Boot-time progress screen. Yellow band keeps the "AURA" title, blue band
+  // shows current step name and a progress bar. Safe to call before any
+  // sensor/LED is up — only requires setupOLED() to have run.
+  display.clearDisplay();
+
+  // Yellow section: AURA title (same position as updateOLEDDisplay)
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(40, 0);
+  display.println("AURA");
+
+  // Blue section, size-1 text
+  display.setTextSize(1);
+
+  // "Loading..." centered
+  const char* loading = "Loading...";
+  int loadingWidth = strlen(loading) * 6;  // size-1 font ≈ 6 px per char
+  display.setCursor((128 - loadingWidth) / 2, 20);
+  display.println(loading);
+
+  // Current step: "[step/total] label" centered
+  char stepStr[32];
+  snprintf(stepStr, sizeof(stepStr), "[%d/%d] %s", step, total, label);
+  int stepWidth = strlen(stepStr) * 6;
+  int stepX = (128 - stepWidth) / 2;
+  if (stepX < 0) stepX = 0;
+  display.setCursor(stepX, 34);
+  display.println(stepStr);
+
+  // Progress bar (outlined rectangle with a filled portion)
+  const int barX = 14, barY = 50, barW = 100, barH = 8;
+  display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
+  if (total > 0) {
+    int fillW = (barW - 2) * step / total;
+    if (fillW > 0) display.fillRect(barX + 1, barY + 1, fillW, barH - 2, SSD1306_WHITE);
+  }
+
+  display.display();
+}
+
 void updateOLEDDisplay() {
   display.clearDisplay();
 
@@ -3324,14 +3694,38 @@ void updateOLEDDisplay() {
   // ===== BLUE SECTION (pixels 16-63): Current mode, centered, big =====
   const char* modeStr = getModeString(currentMode);
 
-  // Calculate text width for centering
-  // Text size 2 = 12 pixels per character width
-  int textWidth = strlen(modeStr) * 12;
-  int xPos = (128 - textWidth) / 2;
-
+  // Size-2 font is ~12 px per char; OLED is 128 px wide -> max 10 chars/line.
+  // Long labels (e.g. "UNDER THE HOOD") get wrapped onto two lines, split at
+  // the last space that lets both halves fit. Otherwise render on one line.
+  const int charW = 12;
+  int len = strlen(modeStr);
   display.setTextSize(2);
-  display.setCursor(xPos, 28);  // Centered vertically in blue section
-  display.println(modeStr);
+  if (len * charW <= 128) {
+    int xPos = (128 - len * charW) / 2;
+    display.setCursor(xPos, 28);
+    display.println(modeStr);
+  } else {
+    int splitAt = -1;
+    for (int i = len - 1; i >= 0; i--) {
+      if (modeStr[i] == ' ' && i * charW <= 128 && (len - i - 1) * charW <= 128) {
+        splitAt = i;
+        break;
+      }
+    }
+    if (splitAt < 0) {
+      display.setCursor(0, 28);
+      display.println(modeStr);
+    } else {
+      char line1[20], line2[20];
+      int l1 = splitAt, l2 = len - splitAt - 1;
+      strncpy(line1, modeStr, l1); line1[l1] = '\0';
+      strncpy(line2, modeStr + splitAt + 1, l2); line2[l2] = '\0';
+      display.setCursor((128 - l1 * charW) / 2, 20);
+      display.println(line1);
+      display.setCursor((128 - l2 * charW) / 2, 38);
+      display.println(line2);
+    }
+  }
 
   // ===== BOTTOM NOTE (small text) =====
   display.setTextSize(1);
@@ -3343,22 +3737,29 @@ void updateOLEDDisplay() {
 
 const char* getModeString(PlayMode mode) {
   switch (mode) {
-    case MODE_STRING_THEREMIN: return "STRING";
-    case MODE_DISTANCE_SENSOR: return "DISTANCE";
-    case MODE_DUAL_THEREMIN: return "DUAL THR";
-    case MODE_DUAL_PIANO: return "DUAL PIANO";
-    case MODE_GRID_SEQUENCER: return "GRID SEQ";
-    case MODE_RHYTHM_TAPPER: return "RHYTHM";
-    case MODE_ARPEGGIATOR: return "ARPEG";
-    case MODE_STEP_SEQ: return "STEP SEQ";
-    case MODE_DUAL_LOOP: return "DUAL LOOP";
-    case MODE_CHORD_JAM: return "CHORD JAM";
-    case MODE_DRONE_SOLO: return "DRONE+SOLO";
-    case MODE_RAIN_MODE: return "RAIN";
-    case MODE_BASS_MACHINE: return "BASS";
-    case MODE_ECHO_DELAY: return "ECHO";
-    case MODE_BATTLE_MODE: return "BATTLE";
-    case MODE_LED_TEST: return "LED TEST";
+    // Active performance modes
+    case MODE_BACKSTAGE:        return "BACKSTAGE";
+    case MODE_BACKSTAGE_2:      return "BACKSTAGE 2";
+    case MODE_STRING_THEREMIN:  return "STRING";
+    case MODE_DUAL_THEREMIN:    return "!DUAL THR";   // ! = broken, fix in progress
+    case MODE_DUAL_PIANO:       return "DUAL PIANO";
+    case MODE_GRID_SEQUENCER:   return "GRID SEQ";
+    case MODE_RHYTHM_TAPPER:    return "!RHYTHM";     // ! = broken (input lag)
+    case MODE_DUAL_LOOP:        return "DUAL LOOP";
+    case MODE_CHORD_JAM:        return "CHORD JAM";
+    case MODE_DRONE_SOLO:       return "DRONE+SOLO";
+    case MODE_BASS_MACHINE:     return "BASS";
+    case MODE_ECHO_DELAY:       return "!ECHO";       // ! = broken (right side frozen)
+    case MODE_BATTLE_MODE:      return "BATTLE";
+    // Calibration / diagnostic tools
+    case MODE_LED_TEST:         return "LED TEST";
+    case MODE_CALIB_SERIAL_CH0: return "CAL S CH0";
+    case MODE_CALIB_SERIAL_CH1: return "CAL S CH1";
+    // Deprecated (leading '*' marks them as pending removal)
+    case MODE_RAIN_MODE:        return "*RAIN";
+    case MODE_STEP_SEQ:         return "*STEP SEQ";
+    case MODE_ARPEGGIATOR:      return "*ARPEG";
+    case MODE_DISTANCE_SENSOR:  return "*DISTANCE";
     default: return "UNKNOWN";
   }
 }
@@ -3392,6 +3793,12 @@ void switchToMode(PlayMode newMode) {
   Serial.print(">> switchToMode() called - New mode: ");
   Serial.println(getModeString(currentMode));
 
+  // Reset snareDrum to drum-like defaults. Modes that want a melodic timbre
+  // (e.g. DRONE+SOLO) override these in their own mode-enter block below.
+  snareDrum.length(150);
+  snareDrum.secondMix(0.5);
+  snareDrum.pitchMod(0.3);
+
   // Mode-specific initialization
   if (currentMode == MODE_DISTANCE_SENSOR) {
     Serial.println(">> Mode: DISTANCE SENSOR (8x8 Grid)");
@@ -3422,6 +3829,60 @@ void switchToMode(PlayMode newMode) {
     Serial.println(currentSensorChannel);
 
     // Small delay to ensure sensors are ready
+    delay(100);
+  } else if (currentMode == MODE_CALIB_SERIAL_CH0 || currentMode == MODE_CALIB_SERIAL_CH1) {
+    // Serial-monitor calibration: isolate a single sensor channel
+    uint8_t calibChannel = (currentMode == MODE_CALIB_SERIAL_CH0) ? 0 : 1;
+
+    Serial.print(">> Mode: CALIBRATION (serial monitor) - CH");
+    Serial.println(calibChannel);
+
+    bool& initFlag = (calibChannel == 0) ? sensor_ch0_initialized : sensor_ch1_initialized;
+    if (!initFlag) {
+      Serial.print("   Initializing VL53L5CX CH");
+      Serial.print(calibChannel);
+      Serial.println("...");
+      initFlag = initDistanceSensor(calibChannel);
+      Serial.print(initFlag ? "   CH init SUCCESS" : "   CH init FAILED");
+      Serial.println();
+    } else {
+      Serial.print("   CH");
+      Serial.print(calibChannel);
+      Serial.println(" already initialized");
+    }
+
+    panicMute();
+    clearAllLEDs();
+    FastLED.show();
+    delay(100);
+  } else if (currentMode == MODE_BACKSTAGE) {
+    // Diagnostic: dual-hand view of both sensor grids on both LED matrices
+    Serial.println(">> Mode: BACKSTAGE");
+    Serial.println("   CH0 -> LEFT matrix | CH1 -> RIGHT matrix");
+    if (!sensor_ch0_initialized) {
+      Serial.println("   Initializing VL53L5CX CH0 (I2C0)...");
+      sensor_ch0_initialized = initDistanceSensor(0);
+      Serial.println(sensor_ch0_initialized ? "   CH0 init SUCCESS" : "   CH0 init FAILED");
+    } else {
+      Serial.println("   CH0 already initialized");
+    }
+    if (!sensor_ch1_initialized) {
+      Serial.println("   Initializing VL53L5CX CH1 (I2C1)...");
+      sensor_ch1_initialized = initDistanceSensor(1);
+      Serial.println(sensor_ch1_initialized ? "   CH1 init SUCCESS" : "   CH1 init FAILED");
+    } else {
+      Serial.println("   CH1 already initialized");
+    }
+    panicMute();
+    clearAllLEDs();
+    FastLED.show();
+    delay(100);
+  } else if (currentMode == MODE_BACKSTAGE_2) {
+    Serial.println(">> Mode: BACKSTAGE 2");
+    Serial.println("   LED-only: pulsing heart (L) + eighth note (R), no sensors");
+    panicMute();
+    clearAllLEDs();
+    FastLED.show();
     delay(100);
   } else if (currentMode == MODE_DUAL_THEREMIN) {
     Serial.println(">> Mode: DUAL THEREMIN");
@@ -3608,6 +4069,11 @@ void switchToMode(PlayMode newMode) {
     droneActive = false;
     droneFreq = 130.81;
     soloLastNote = -1;
+    // Re-tune snareDrum into a melodic pitched voice: no noise, no drum
+    // pitch-drop, long ring-out so successive notes blend instead of "chop".
+    snareDrum.length(500);
+    snareDrum.secondMix(0.0);
+    snareDrum.pitchMod(0.0);
     if (sensor_ch0_initialized) readDistanceGrid(0);
     if (sensor_ch1_initialized) readDistanceGrid(1);
     delay(100);
@@ -3687,15 +4153,17 @@ void handleEncoder() {
   if (positionChange != 0) {
     lastEncoderPosition = newPosition - (newPosition % 4);  // Snap to multiple of 4
 
-    if (positionChange > 0) {
-      // Clockwise rotation - next mode
+    // Encoder hardware reports clockwise as a NEGATIVE positionChange on this
+    // build, so a right-turn (CW) should advance to the next enum value.
+    if (positionChange < 0) {
+      // Clockwise rotation - next mode (wraps at MODE_LAST -> MODE_FIRST)
       int nextMode = (int)currentMode + 1;
-      if (nextMode > MODE_LED_TEST) nextMode = MODE_STRING_THEREMIN;
+      if (nextMode > MODE_LAST) nextMode = MODE_FIRST;
       switchToMode((PlayMode)nextMode);
-    } else if (positionChange < 0) {
-      // Counter-clockwise rotation - previous mode
+    } else if (positionChange > 0) {
+      // Counter-clockwise rotation - previous mode (wraps at MODE_FIRST -> MODE_LAST)
       int prevMode = (int)currentMode - 1;
-      if (prevMode < MODE_STRING_THEREMIN) prevMode = MODE_LED_TEST;
+      if (prevMode < MODE_FIRST) prevMode = MODE_LAST;
       switchToMode((PlayMode)prevMode);
     }
   }
