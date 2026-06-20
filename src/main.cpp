@@ -25,12 +25,12 @@
 #include <SerialFlash.h>
 #include <SparkFun_VL53L5CX_Library.h>
 #include <FastLED.h>
-#include <Encoder.h>
 
 #include "Config.h"
 #include "MusicNotes.h"
 #include "LedMatrix.h"
 #include "OledStatus.h"
+#include "RotaryUI.h"
 
 // ============================================================================
 // AUDIO OBJECT DECLARATIONS
@@ -142,11 +142,7 @@ bool ledVisualizationEnabled = true;
 
 // OLED display instance now lives inside lib/OledStatus.
 
-// Rotary encoder (pin assignments live in Config.h).
-Encoder knob(ENCODER_PIN_A, ENCODER_PIN_B);
-long lastEncoderPosition = 0;
-bool lastButtonState = HIGH;
-unsigned long lastButtonPress = 0;
+// Rotary encoder state and the Encoder instance now live inside lib/RotaryUI.
 
 // True when a Karplus-Strong string voice is currently sustaining. Lets
 // panicMute() know whether it actually needs to release the envelope.
@@ -218,7 +214,7 @@ void setup() {
 
   // ---- Step 4/6: Rotary encoder ----
   showLoadingScreen("Encoder", 4, 6);
-  pinMode(ENCODER_BUTTON, INPUT_PULLUP);
+  RotaryUI::begin(ENCODER_PIN_A, ENCODER_PIN_B, ENCODER_BUTTON, DEBOUNCE_DELAY);
   Serial.println("Rotary encoder initialized!");
   delay(150);
 
@@ -1289,80 +1285,64 @@ void switchToMode(PlayMode newMode) {
 // ROTARY ENCODER FUNCTIONS
 // ============================================================================
 
+// Map rotation events from lib/RotaryUI to mode transitions. On this build
+// the encoder reports CW as a NEGATIVE detent count, so a right-turn (CW)
+// advances to the next enum value with wraparound at MODE_LAST/MODE_FIRST.
 void handleEncoder() {
-  long newPosition = knob.read();
+  int detents = RotaryUI::pollRotation();
+  if (detents == 0) return;
 
-  // Encoder has 4 pulses per detent, so divide by 4 for smoother control
-  long positionChange = (newPosition - lastEncoderPosition) / 4;
-
-  if (positionChange != 0) {
-    lastEncoderPosition = newPosition - (newPosition % 4);  // Snap to multiple of 4
-
-    // Encoder hardware reports clockwise as a NEGATIVE positionChange on this
-    // build, so a right-turn (CW) should advance to the next enum value.
-    if (positionChange < 0) {
-      // Clockwise rotation - next mode (wraps at MODE_LAST -> MODE_FIRST)
-      int nextMode = (int)currentMode + 1;
-      if (nextMode > MODE_LAST) nextMode = MODE_FIRST;
-      switchToMode((PlayMode)nextMode);
-    } else if (positionChange > 0) {
-      // Counter-clockwise rotation - previous mode (wraps at MODE_FIRST -> MODE_LAST)
-      int prevMode = (int)currentMode - 1;
-      if (prevMode < MODE_FIRST) prevMode = MODE_LAST;
-      switchToMode((PlayMode)prevMode);
-    }
+  if (detents < 0) {
+    int nextMode = (int)currentMode + 1;
+    if (nextMode > MODE_LAST) nextMode = MODE_FIRST;
+    switchToMode((PlayMode)nextMode);
+  } else {
+    int prevMode = (int)currentMode - 1;
+    if (prevMode < MODE_FIRST) prevMode = MODE_LAST;
+    switchToMode((PlayMode)prevMode);
   }
 }
 
+// Map button-press events from lib/RotaryUI to mode-specific "clear" actions
+// so the player can restart a pattern without leaving the current mode.
 void handleEncoderButton() {
-  bool buttonState = digitalRead(ENCODER_BUTTON);
-  unsigned long currentTime = millis();
+  if (!RotaryUI::pollButtonPressed()) return;
 
-  // Detect button press (HIGH to LOW transition with debounce)
-  if (buttonState == LOW && lastButtonState == HIGH &&
-      (currentTime - lastButtonPress) > DEBOUNCE_DELAY) {
-    lastButtonPress = currentTime;
-
-    // Button action depends on current mode: clear the active pattern/state
-    // so the player can start over without losing their place in the menu.
-    if (currentMode == MODE_DUAL_LOOP) {
-      Serial.println(">> DUAL LOOP: Clearing all layers!");
-      for (int r = 0; r < 8; r++) {
-        for (int c = 0; c < 8; c++) {
-          dualLoopMelody[r][c] = false;
-          dualLoopDrums[r][c]  = false;
-        }
+  if (currentMode == MODE_DUAL_LOOP) {
+    Serial.println(">> DUAL LOOP: Clearing all layers!");
+    for (int r = 0; r < 8; r++) {
+      for (int c = 0; c < 8; c++) {
+        dualLoopMelody[r][c] = false;
+        dualLoopDrums[r][c]  = false;
       }
-      dualLoopStep = 0;
-      panicMute();
-      clearAllLEDs();
-      FastLED.show();
-    } else if (currentMode == MODE_CHORD_JAM) {
-      Serial.println(">> CHORD JAM: Reset!");
-      chordJamIndex = 0;
-      panicMute();
-      clearAllLEDs();
-      FastLED.show();
-    } else if (currentMode == MODE_BASS_MACHINE) {
-      Serial.println(">> BASS: Clearing pattern!");
-      for (int r = 0; r < 8; r++) {
-        for (int c = 0; c < 8; c++) bassGrid[r][c] = false;
-      }
-      bassStep = 0;
-      panicMute();
-      clearAllLEDs();
-      FastLED.show();
-    } else if (currentMode == MODE_BATTLE_MODE) {
-      Serial.println(">> BATTLE: Score reset!");
-      battleScore[0] = 0;
-      battleScore[1] = 0;
-      panicMute();
-      clearAllLEDs();
-      FastLED.show();
     }
-
-    updateOLEDDisplay();
+    dualLoopStep = 0;
+    panicMute();
+    clearAllLEDs();
+    FastLED.show();
+  } else if (currentMode == MODE_CHORD_JAM) {
+    Serial.println(">> CHORD JAM: Reset!");
+    chordJamIndex = 0;
+    panicMute();
+    clearAllLEDs();
+    FastLED.show();
+  } else if (currentMode == MODE_BASS_MACHINE) {
+    Serial.println(">> BASS: Clearing pattern!");
+    for (int r = 0; r < 8; r++) {
+      for (int c = 0; c < 8; c++) bassGrid[r][c] = false;
+    }
+    bassStep = 0;
+    panicMute();
+    clearAllLEDs();
+    FastLED.show();
+  } else if (currentMode == MODE_BATTLE_MODE) {
+    Serial.println(">> BATTLE: Score reset!");
+    battleScore[0] = 0;
+    battleScore[1] = 0;
+    panicMute();
+    clearAllLEDs();
+    FastLED.show();
   }
 
-  lastButtonState = buttonState;
+  updateOLEDDisplay();
 }
