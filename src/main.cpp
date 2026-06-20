@@ -26,12 +26,19 @@
 #include <FastLED.h>
 
 #include "Config.h"
+#include "AuraState.h"
 #include "MusicNotes.h"
 #include "LedMatrix.h"
 #include "OledStatus.h"
 #include "RotaryUI.h"
 #include "ToFGrid.h"
 #include "SynthVoices.h"
+
+#include "modes/Backstage.h"
+#include "modes/DualLoop.h"
+#include "modes/ChordJam.h"
+#include "modes/BassMachine.h"
+#include "modes/Battle.h"
 
 // ============================================================================
 // GLOBAL VARIABLES
@@ -41,41 +48,12 @@
 // with `extern` so this file - and every mode - can keep poking them by
 // their short names.
 
-// Play mode + master volume
+// Play mode + master volume. Per-mode private state (sequencer grids, touch
+// latches, step counters, etc.) lives at file scope inside the matching
+// src/modes/*.cpp; this file only owns the truly shared globals declared in
+// include/AuraState.h.
 PlayMode currentMode = MODE_BACKSTAGE;
 float masterVolume = 1.0;
-
-// DUAL LOOP: 8-step melody/drum sequencer driven by both hands.
-bool dualLoopMelody[8][8] = {false};
-bool dualLoopDrums[8][8]  = {false};
-bool dualLoopTouchL[8][8] = {false};
-bool dualLoopTouchR[8][8] = {false};
-unsigned long dualLoopTouchTimeL[8][8] = {0};
-unsigned long dualLoopTouchTimeR[8][8] = {0};
-int  dualLoopStep = 0;
-unsigned long dualLoopLastStep = 0;
-float dualLoopTempo = 180.0;          // ms per step
-
-// CHORD JAM: left hand picks the chord, right hand strums it.
-int  chordJamIndex = 0;               // 0=I, 1=IV, 2=V, 3=vi
-unsigned long chordJamLastStrum = 0;
-bool chordJamTouchState[8][8] = {false};
-unsigned long chordJamTouchTime[8][8] = {0};
-float chordJamStrumVelocity = 0.0;
-
-// BASS MACHINE: 8-step bass sequencer with a filter sweep on the right hand.
-bool bassGrid[8][8]       = {false};
-bool bassTouchState[8][8] = {false};
-unsigned long bassTouchTime[8][8] = {0};
-int  bassStep = 0;
-unsigned long bassLastStep = 0;
-float bassTempo      = 200.0;         // ms per step
-float bassFilterFreq = 400.0;         // Hz, swept by hand distance
-
-// BATTLE MODE: two players, two scores, two voices.
-float battleFreq[2]  = {440.0, 440.0};
-float battleVol[2]   = {0.0,   0.0};
-int   battleScore[2] = {0, 0};
 
 // VL53L5CX Distance Sensors (8x8 mode)
 // CH0: I2C0 (Wire) - SDA=18, SCL=19
@@ -113,14 +91,10 @@ unsigned long lastUpdateTime = 0;
 // FUNCTION DECLARATIONS
 // ============================================================================
 
-void processDualLoop();
-void processChordJam();
-void processBassMachine();
-void processBattleMode();
+// Most helper declarations live in include/AuraState.h. Only the bits that
+// are still defined in this file - the mode-switching glue and a couple of
+// boot-time wrappers - need forward decls here.
 void calculateHandMetrics(uint16_t grid[8][8], float& avgDistance, int& centroidX, int& centroidY, int& activeZones);
-void panicMute();
-bool initDistanceSensor(uint8_t channel);
-void readDistanceGrid(uint8_t channel);
 void setupLEDs();
 void clearAllLEDs();
 void setupOLED();
@@ -206,135 +180,21 @@ void loop() {
   if (currentTime - lastUpdateTime >= UPDATE_INTERVAL_MS) {
     lastUpdateTime = currentTime;
 
-    // Dispatch to the active mode. Each branch is responsible for reading
-    // whatever sensor data it needs and driving its own audio + LEDs.
+    // Dispatch to the active mode. Each mode owns its own state and is
+    // responsible for reading sensors + driving audio + LEDs.
     if (currentMode == MODE_DUAL_LOOP) {
-      processDualLoop();
+      DualLoop::process();
     } else if (currentMode == MODE_CHORD_JAM) {
-      processChordJam();
+      ChordJam::process();
     } else if (currentMode == MODE_BASS_MACHINE) {
-      processBassMachine();
+      BassMachine::process();
     } else if (currentMode == MODE_BATTLE_MODE) {
-      processBattleMode();
+      Battle::process();
     } else if (currentMode == MODE_BACKSTAGE) {
-      // Diagnostic: render BOTH sensor grids simultaneously. CH0 -> LEFT
-      // matrix, CH1 -> RIGHT matrix. Rotation is handled inside
-      // readDistanceGrid(), so grid[row][col] already matches the user-facing
-      // orientation of each LED matrix.
-      if (currentTime - lastSensorRead >= SENSOR_READ_INTERVAL) {
-        lastSensorRead = currentTime;
-        if (sensor_ch0_initialized) readDistanceGrid(0);
-        if (sensor_ch1_initialized) readDistanceGrid(1);
-        for (int row = 0; row < MATRIX_HEIGHT; row++) {
-          for (int col = 0; col < MATRIX_WIDTH; col++) {
-            int ledIndex = LedMatrix::xyToLEDIndex(row, col);
-            leds[ledIndex]   = sensor_ch0_initialized
-                                 ? LedMatrix::distanceToColor(distanceGrid_ch0[row][col])
-                                 : CRGB::Black;
-            leds_r[ledIndex] = sensor_ch1_initialized
-                                 ? LedMatrix::distanceToColor(distanceGrid_ch1[row][col])
-                                 : CRGB::Black;
-          }
-        }
-        FastLED.show();
-      }
+      Backstage::process(currentTime);
     } else if (currentMode == MODE_BACKSTAGE_2) {
-      // LED-only animation. No sensors used. Left matrix = small pulsing
-      // heart with an EKG trace scrolling through its middle row. Right
-      // matrix = rainbow "AURA TSA 2026" text scrolling right-to-left.
-      // Both animations share an 80 ms tick so the EKG and text scroll
-      // together. Right matrix is physically column-mirrored, so its
-      // column index is flipped at render time.
-      static uint32_t lastFrame = 0;
-      static uint16_t scrollPos = 0;
-      if (currentTime - lastFrame >= 80) {
-        lastFrame = currentTime;
-        scrollPos++;
-
-        // ---- LEFT: small heart (6x5) centered + scrolling EKG ----
-        static const uint8_t heart[5][6] = {
-          {1,1,0,0,1,1},
-          {1,1,1,1,1,1},
-          {1,1,1,1,1,1},
-          {0,1,1,1,1,0},
-          {0,0,1,1,0,0}
-        };
-        // PQRST waveform sampled every column. Lower row = higher up on
-        // the matrix. Baseline = 4, P=3, Q=5, R=1 (spike), S=6, T=3.
-        static const int8_t ekgPattern[16] =
-          {4,4,3,3,4,5,1,6,4,3,3,4,4,4,4,4};
-        const int EKG_LEN = 16;
-
-        float phase = (currentTime % 1400) / 1400.0f;
-        float s = (sin(phase * 2.0f * PI) + 1.0f) * 0.5f;
-        uint8_t heartBright = 35 + (uint8_t)(55.0f * s);  // 35..90 dim red
-
-        for (int row = 0; row < 8; row++) {
-          for (int col = 0; col < 8; col++) {
-            bool isHeart = (row >= 2 && row <= 6 && col >= 1 && col <= 6)
-                             && heart[row - 2][col - 1];
-            leds[LedMatrix::xyToLEDIndex(row, col)] =
-              isHeart ? CRGB(heartBright, 0, 0) : CRGB::Black;
-          }
-        }
-        // Overlay EKG as connected vertical segments; rightmost col is
-        // newest sample (brightest), older cols fade toward the left.
-        for (int c = 0; c < 8; c++) {
-          int patternCol = (scrollPos + c) % EKG_LEN;
-          int prevCol    = (patternCol + EKG_LEN - 1) % EKG_LEN;
-          int waveRow = ekgPattern[patternCol];
-          int prevRow = ekgPattern[prevCol];
-          uint8_t b = 50 + c * 29;  // 50..253
-          CRGB color = CRGB(b, b / 6, b / 6);
-          int r1 = min(prevRow, waveRow);
-          int r2 = max(prevRow, waveRow);
-          for (int r = r1; r <= r2; r++) {
-            leds[LedMatrix::xyToLEDIndex(r, c)] = color;
-          }
-        }
-
-        // ---- RIGHT: rainbow scrolling "AURA TSA 2026" ----
-        // 5-wide x 7-tall column-major font. Bit 0 = top row of glyph.
-        static const uint8_t font[][5] = {
-          {0x7E, 0x09, 0x09, 0x09, 0x7E},  // 0: A
-          {0x3F, 0x40, 0x40, 0x40, 0x3F},  // 1: U
-          {0x7F, 0x09, 0x19, 0x29, 0x46},  // 2: R
-          {0x01, 0x01, 0x7F, 0x01, 0x01},  // 3: T
-          {0x46, 0x49, 0x49, 0x49, 0x31},  // 4: S
-          {0x00, 0x00, 0x00, 0x00, 0x00},  // 5: space
-          {0x42, 0x61, 0x51, 0x49, 0x46},  // 6: 2
-          {0x3E, 0x51, 0x49, 0x45, 0x3E},  // 7: 0
-          {0x3E, 0x49, 0x49, 0x49, 0x30}   // 8: 6
-        };
-        // Message "AURA TSA 2026" -> font indices
-        static const uint8_t msgIdx[] = {0,1,2,0,5,3,4,0,5,6,7,6,8};
-        const int MSG_CHARS = 13;
-        const int CHAR_W   = 6;                   // 5 glyph cols + 1 spacer
-        const int TEXT_LEN = MSG_CHARS * CHAR_W;  // 78
-        const int LOOP_LEN = TEXT_LEN + 16;       // blank gap between loops
-        int textScroll = scrollPos % LOOP_LEN;
-
-        for (int c = 0; c < 8; c++) {
-          int physCol = 7 - c;  // right matrix is physically mirrored
-          int textCol = (textScroll + physCol) % LOOP_LEN;
-          uint8_t colBits = 0;
-          if (textCol < TEXT_LEN) {
-            int charIdx   = textCol / CHAR_W;
-            int colInChar = textCol % CHAR_W;
-            if (colInChar < 5) colBits = font[msgIdx[charIdx]][colInChar];
-          }
-          uint8_t hue = (uint8_t)(textCol * 8);
-          CRGB on = CHSV(hue, 255, 200);
-          for (int row = 0; row < 8; row++) {
-            bool lit = (row < 7) && ((colBits >> row) & 1);
-            leds_r[LedMatrix::xyToLEDIndex(row, c)] = lit ? on : CRGB::Black;
-          }
-        }
-
-        FastLED.show();
-      }
+      Backstage::processAnimation(currentTime);
     }
-    // Drum mode is event-driven (no continuous update needed)
   }
 }
 
@@ -361,533 +221,10 @@ void calculateHandMetrics(uint16_t grid[8][8], float& avgDistance,
   ToFGrid::calculateHandMetrics(grid, avgDistance, centroidX, centroidY, activeZones);
 }
 
-void processDualLoop() {
-  // DUAL LOOP: Left hand = melody grid, Right hand = drum grid
-  // Both auto-loop in sync on same 8-step timeline
-  // Build a complete song layer by layer!
-
-  unsigned long currentTime = millis();
-
-  // Read both sensors
-  if (sensor_ch0_initialized) readDistanceGrid(0);
-  if (sensor_ch1_initialized) readDistanceGrid(1);
-
-  // --- LEFT HAND: Toggle melody notes ---
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t dist = distanceGrid_ch0[row][col];
-      bool isTouched = (dist < GRID_ZONE_THRESHOLD && dist > 50);
-      bool wasTouched = dualLoopTouchL[row][col];
-
-      if (isTouched && !wasTouched && (currentTime - dualLoopTouchTimeL[row][col]) > 150) {
-        dualLoopMelody[col][row] = !dualLoopMelody[col][row];  // col=step, row=note
-        dualLoopTouchTimeL[row][col] = currentTime;
-      }
-      dualLoopTouchL[row][col] = isTouched;
-    }
-  }
-
-  // --- RIGHT HAND: Toggle drum hits ---
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t dist = distanceGrid_ch1[row][col];
-      bool isTouched = (dist < GRID_ZONE_THRESHOLD && dist > 50);
-      bool wasTouched = dualLoopTouchR[row][col];
-
-      if (isTouched && !wasTouched && (currentTime - dualLoopTouchTimeR[row][col]) > 150) {
-        dualLoopDrums[col][row] = !dualLoopDrums[col][row];  // col=step, row=drum
-        dualLoopTouchTimeR[row][col] = currentTime;
-      }
-      dualLoopTouchR[row][col] = isTouched;
-    }
-  }
-
-  // --- AUTO-ADVANCE STEP ---
-  if (currentTime - dualLoopLastStep >= (unsigned long)dualLoopTempo) {
-    dualLoopLastStep = currentTime;
-
-    // Play melody notes at current step (left hand grid)
-    // 8 rows = 8 notes of the C major scale (C4 to C5)
-    for (int note = 0; note < 8; note++) {
-      if (dualLoopMelody[dualLoopStep][note]) {
-        float freq = MusicNotes::midiToFreq(MusicNotes::MAJOR_SCALE_C4[note]);
-        stringFilter.frequency(freq * 2.5);
-        stringFilter.resonance(1.2);
-        stringVoice.noteOn(freq, 0.8);
-        stringEnvelope.noteOn();
-        noteActive = true;
-        mixer1.gain(0, 0.7 * masterVolume);
-      }
-    }
-
-    // Play drum hits at current step (right hand grid)
-    // Row 0-1: Kick, Row 2-3: Snare, Row 4-5: Hi-hat, Row 6-7: Percussion
-    for (int drum = 0; drum < 8; drum++) {
-      if (dualLoopDrums[dualLoopStep][drum]) {
-        if (drum < 2) {
-          kickDrum.frequency(drum == 0 ? 80 : 60);
-          kickDrum.noteOn();
-          mixer1.gain(1, 0.8 * masterVolume);
-        } else if (drum < 4) {
-          snareDrum.frequency(drum == 2 ? 200 : 280);
-          snareDrum.noteOn();
-          mixer1.gain(2, 0.7 * masterVolume);
-        } else if (drum < 6) {
-          hatEnvelope.noteOn();
-          mixer1.gain(3, (drum == 4 ? 0.4 : 0.3) * masterVolume);
-        } else {
-          // Extra percussion: use snare at higher freq
-          snareDrum.frequency(drum == 6 ? 400 : 500);
-          snareDrum.noteOn();
-          mixer1.gain(2, 0.5 * masterVolume);
-        }
-      }
-    }
-
-    dualLoopStep = (dualLoopStep + 1) % 8;
-  }
-
-  // --- LED VISUALIZATION ---
-  // Left matrix = melody pattern, Right matrix = drum pattern
-  if (ledVisualizationEnabled) {
-    clearAllLEDs();
-
-    for (int row = 0; row < 8; row++) {
-      for (int col = 0; col < 8; col++) {
-        int ledIndex = row * 8 + col;
-        bool melodyActive = dualLoopMelody[col][row];
-        bool drumActive = dualLoopDrums[col][row];
-
-        // Left matrix: melody
-        if (col == dualLoopStep) {
-          if (melodyActive) {
-            leds[ledIndex] = CRGB(0, 255, 100);  // Bright green
-          } else {
-            leds[ledIndex] = CRGB(20, 20, 20);   // Dim playhead
-          }
-        } else if (melodyActive) {
-          uint8_t hue = 80 + (row * 10);
-          leds[ledIndex] = CHSV(hue, 255, 120);
-        }
-
-        // Right matrix: drums
-        if (col == dualLoopStep) {
-          if (drumActive) {
-            leds_r[ledIndex] = CRGB(255, 100, 0); // Bright orange
-          } else {
-            leds_r[ledIndex] = CRGB(20, 20, 20);  // Dim playhead
-          }
-        } else if (drumActive) {
-          uint8_t hue = (row * 32);
-          leds_r[ledIndex] = CHSV(hue, 255, 120);
-        }
-      }
-    }
-
-    FastLED.show();
-  }
-}
-
-void processChordJam() {
-  // CHORD JAM (guitar model):
-  //   Left sensor  = FRETBOARD. 4 "strings", each = a pair of LED rows
-  //     (rows 0-1, 2-3, 4-5, 6-7). A string is FRETTED when any cell in its
-  //     2-row strip is touched; the whole strip lights up in that string's color.
-  //   Right sensor = SOUNDHOLE. A lateral swipe ("strum") plays the next
-  //     fretted string in the swipe direction. Holding multiple strings and
-  //     strumming several times in a row = arpeggiated chord (Karplus-Strong
-  //     decay tails overlap so it sounds like a chord, not a sequence).
-  //   No fretted strings = muted, just like palming the strings on a real guitar.
-  // String pitches come from MusicNotes::GUITAR_OPEN_TUNING_TOP4 (E3, A3, D4, G4).
-  static const CRGB stringColors[4] = {
-    CRGB(255,  60,  40),  // string 0 - red    (E)
-    CRGB(255, 180,   0),  // string 1 - amber  (A)
-    CRGB( 40, 255,  80),  // string 2 - green  (D)
-    CRGB( 60, 140, 255),  // string 3 - blue   (G)
-  };
-
-  // Strum is now a VERTICAL motion: how fast the hand moves up/down over the
-  // soundhole sensor. Moving DOWN toward the sensor (distance shrinking) is a
-  // downstroke; moving UP away (distance growing) is an upstroke.
-  const float STRUM_VELOCITY_THRESHOLD = 25.0;  // mm change per frame to count
-
-  static float prevStrumDist = -1.0f;
-  static int   lastStrummedString = -1;
-
-  unsigned long currentTime = millis();
-  if (sensor_ch0_initialized) readDistanceGrid(0);
-  if (sensor_ch1_initialized) readDistanceGrid(1);
-
-  // --- LEFT HAND: pick a single string = the row-pair the hand has
-  // REACHED FURTHEST across the fretboard. Strings are laid out from the
-  // player's POV: string 0 (low E) at the far side (rows 6-7), string 3
-  // (high G) at the near side (rows 0-1). Hovering over the near rows alone
-  // selects string 0; reaching further selects strings 1, 2, 3 in turn.
-  bool stringFretted[4] = {false, false, false, false};
-  int highestFretted = -1;
-  for (int s = 0; s < 4; s++) {
-    int row1 = (3 - s) * 2;       // string 0 -> rows 6,7 ; string 3 -> rows 0,1
-    int row2 = (3 - s) * 2 + 1;
-    for (int col = 0; col < 8; col++) {
-      uint16_t d1 = distanceGrid_ch0[row1][col];
-      uint16_t d2 = distanceGrid_ch0[row2][col];
-      if ((d1 > 50 && d1 < GRID_ZONE_THRESHOLD) ||
-          (d2 > 50 && d2 < GRID_ZONE_THRESHOLD)) {
-        highestFretted = s;  // keep overwriting; final value = string reached furthest
-        break;
-      }
-    }
-  }
-  if (highestFretted >= 0) stringFretted[highestFretted] = true;
-
-  // --- RIGHT HAND: detect strum (vertical motion velocity) ---
-  float rightAvgDist = 0;
-  int rightCentroidX = 0, rightCentroidY = 0, rightZones = 0;
-  calculateHandMetrics(distanceGrid_ch1, rightAvgDist, rightCentroidX, rightCentroidY, rightZones);
-
-  bool strum = false;
-  int strumDir = +1;  // +1 = downstroke (hand moving toward sensor)
-  if (rightZones > 0) {
-    if (prevStrumDist < 0) {
-      strum = true;          // hand just arrived = automatic single pluck
-      strumDir = +1;
-    } else {
-      float dd = rightAvgDist - prevStrumDist;  // +ve = hand rising, -ve = falling
-      if (dd <= -STRUM_VELOCITY_THRESHOLD && (currentTime - chordJamLastStrum) > 100) {
-        strum = true;  strumDir = +1;   // downstroke (hand swinging down)
-      } else if (dd >= STRUM_VELOCITY_THRESHOLD && (currentTime - chordJamLastStrum) > 100) {
-        strum = true;  strumDir = -1;   // upstroke (hand swinging up)
-      }
-    }
-    prevStrumDist = rightAvgDist;
-  } else {
-    prevStrumDist = -1.0f;
-  }
-
-  // --- Fire next fretted string in the strum direction ---
-  if (strum) {
-    int playString = -1;
-    if (lastStrummedString < 0) {
-      // No history: scan from the appropriate end so first strum picks the
-      // bottom-most (or top-most) currently-fretted string.
-      int start = (strumDir > 0) ? 0 : 3;
-      for (int i = 0; i < 4; i++) {
-        int s = (strumDir > 0) ? (start + i) : (start - i);
-        if (stringFretted[s]) { playString = s; break; }
-      }
-    } else {
-      // Walk to the next fretted string in the strum direction, wrapping around.
-      for (int i = 1; i <= 4; i++) {
-        int s = ((lastStrummedString + strumDir * i) % 4 + 4) % 4;
-        if (stringFretted[s]) { playString = s; break; }
-      }
-    }
-
-    if (playString >= 0) {
-      float freq = MusicNotes::midiToFreq(MusicNotes::GUITAR_OPEN_TUNING_TOP4[playString]);
-      float coverage = (float)rightZones / 64.0;
-      float velocity = constrain(0.4 + coverage * 0.6, 0.3, 1.0);
-      stringFilter.frequency(freq * 3.0);
-      stringFilter.resonance(2.0);
-      stringVoice.noteOn(freq, velocity);
-      stringEnvelope.noteOn();
-      mixer1.gain(0, 0.7 * masterVolume);
-      noteActive = true;
-      lastStrummedString = playString;
-      chordJamIndex = playString;
-      chordJamLastStrum = currentTime;
-    }
-  }
-
-  // --- LED VISUALIZATION ---
-  if (ledVisualizationEnabled) {
-    clearAllLEDs();
-
-    // LEFT matrix: 4 strings as 2-row strips. Whole strip lit if fretted;
-    // briefly flash the string that was just strummed.
-    for (int s = 0; s < 4; s++) {
-      CRGB color = stringColors[s];
-      if (!stringFretted[s]) color.nscale8(25);  // dim baseline
-      if (lastStrummedString == s && (currentTime - chordJamLastStrum) < 250) {
-        uint8_t flash = 255 - ((currentTime - chordJamLastStrum) * 255 / 250);
-        color = stringColors[s];
-        color.r = qadd8(color.r, flash);
-        color.g = qadd8(color.g, flash / 2);
-        color.b = qadd8(color.b, flash / 2);
-      }
-      int row1 = (3 - s) * 2, row2 = (3 - s) * 2 + 1;  // flipped to match player POV
-      for (int col = 0; col < 8; col++) {
-        leds[row1 * 8 + col] = color;
-        leds[row2 * 8 + col] = color;
-      }
-    }
-
-    // RIGHT matrix: yellow horizontal BAR tracks the strum hand's height
-    // (closer to sensor = lower row, farther = higher row). Whole matrix
-    // flashes amber when a strum just fired.
-    int strumFlash = 0;
-    if (currentTime - chordJamLastStrum < 200) {
-      strumFlash = 255 - ((currentTime - chordJamLastStrum) * 255 / 200);
-    }
-    // Map current right-hand distance to a row index 0..7
-    int strumRow = -1;
-    if (rightZones > 0) {
-      float clamped = constrain(rightAvgDist, 60.0f, 400.0f);
-      float t = (clamped - 60.0f) / (400.0f - 60.0f);
-      strumRow = constrain((int)(t * 7.99f), 0, 7);
-    }
-    for (int row = 0; row < 8; row++) {
-      for (int col = 0; col < 8; col++) {
-        int ledIndex = row * 8 + col;
-        if (row == strumRow) {
-          leds_r[ledIndex] = CRGB(220, 220, 80);  // bright yellow strum bar
-        } else if (strumFlash > 0) {
-          leds_r[ledIndex] = CRGB(strumFlash / 4, strumFlash / 6, 0);
-        } else {
-          leds_r[ledIndex] = CRGB(8, 6, 0);
-        }
-      }
-    }
-    FastLED.show();
-  }
-}
-
-void processBassMachine() {
-  // BASS MACHINE: Left hand = toggle bass notes in loop, Right hand = filter sweep
-  // Bass notes come from MusicNotes::MAJOR_SCALE_C2 (C2..C3).
-
-  unsigned long currentTime = millis();
-
-  if (sensor_ch0_initialized) readDistanceGrid(0);
-  if (sensor_ch1_initialized) readDistanceGrid(1);
-
-  // --- LEFT HAND: Toggle bass notes in 8-step loop ---
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t dist = distanceGrid_ch0[row][col];
-      bool isTouched = (dist < GRID_ZONE_THRESHOLD && dist > 50);
-      bool wasTouched = bassTouchState[row][col];
-      if (isTouched && !wasTouched && (currentTime - bassTouchTime[row][col]) > 150) {
-        bassGrid[col][row] = !bassGrid[col][row];
-        bassTouchTime[row][col] = currentTime;
-      }
-      bassTouchState[row][col] = isTouched;
-    }
-  }
-
-  // --- RIGHT HAND: Filter sweep (wah) ---
-  float rightAvg = 0;
-  int rightCount = 0;
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t d = distanceGrid_ch1[row][col];
-      if (d < GRID_ZONE_THRESHOLD && d > 50) {
-        rightAvg += d;
-        rightCount++;
-      }
-    }
-  }
-  if (rightCount > 3) {
-    rightAvg /= rightCount;
-    // Map distance to filter frequency: closer = higher cutoff (bright), farther = low (dark)
-    bassFilterFreq = constrain(2000.0 - (rightAvg * 4.0), 100.0, 2000.0);
-  } else {
-    bassFilterFreq = 400.0;  // Default
-  }
-
-  // --- AUTO-ADVANCE STEP ---
-  if (currentTime - bassLastStep >= (unsigned long)bassTempo) {
-    bassLastStep = currentTime;
-
-    for (int note = 0; note < 8; note++) {
-      if (bassGrid[bassStep][note]) {
-        float freq = MusicNotes::midiToFreq(MusicNotes::MAJOR_SCALE_C2[note]);
-        stringFilter.frequency(bassFilterFreq);
-        stringFilter.resonance(3.0);  // Resonant for funky tone
-        stringVoice.noteOn(freq, 0.9);
-        stringEnvelope.noteOn();
-        noteActive = true;
-        mixer1.gain(0, 0.8 * masterVolume);
-      }
-    }
-    bassStep = (bassStep + 1) % 8;
-  }
-
-  // --- LED VISUALIZATION ---
-  if (ledVisualizationEnabled) {
-    clearAllLEDs();
-    // Left matrix: bass pattern grid
-    for (int row = 0; row < 8; row++) {
-      for (int col = 0; col < 8; col++) {
-        int ledIndex = row * 8 + col;
-        if (col == bassStep) {
-          if (bassGrid[col][row]) {
-            leds[ledIndex] = CRGB::White;
-          } else {
-            leds[ledIndex] = CRGB(20, 5, 0);  // Dim amber playhead
-          }
-        } else if (bassGrid[col][row]) {
-          uint8_t brightness = 100 + (int)(bassFilterFreq / 20.0);
-          leds[ledIndex] = CRGB(brightness, brightness / 4, 0);
-        }
-      }
-    }
-    // Right matrix: chord-jam-style row-pair scan with anti-flicker.
-    //   1) Require >=2 cells per pair before counting it (kills single-cell
-    //      sensor noise that caused phantom "1-row" flickers).
-    //   2) Require 3 consecutive frames at the same raw pair before
-    //      committing it as the target (kills boundary chatter).
-    //   3) Step the displayed bar by AT MOST 1 pair per 50 ms so a hand
-    //      that lands far away grows the bar smoothly 2 -> 4 -> 6 -> 8
-    //      rather than skipping.
-    // 4 levels: 6-7 -> 4-7 -> 2-7 -> 0-7. Red-to-orange gradient preserved.
-    static int displayedPair  = 0;
-    static int targetPair     = 0;
-    static int candidatePair  = 0;
-    static int candidateFrames = 0;
-    static uint32_t lastPairStep = 0;
-    const int STABILITY_FRAMES = 3;
-    const uint32_t STEP_INTERVAL_MS = 50;
-
-    int rawPair = 0;
-    for (int p = 0; p < 4; p++) {
-      int row1 = 6 - p * 2;  // p=0 -> rows 6,7 ; p=3 -> rows 0,1
-      int row2 = row1 + 1;
-      int cellsInPair = 0;
-      for (int col = 0; col < 8; col++) {
-        uint16_t d1 = distanceGrid_ch1[row1][col];
-        uint16_t d2 = distanceGrid_ch1[row2][col];
-        if (d1 > 50 && d1 < GRID_ZONE_THRESHOLD) cellsInPair++;
-        if (d2 > 50 && d2 < GRID_ZONE_THRESHOLD) cellsInPair++;
-      }
-      if (cellsInPair >= 2) rawPair = p;
-    }
-
-    if (rawPair == candidatePair) {
-      if (candidateFrames < STABILITY_FRAMES) candidateFrames++;
-      if (candidateFrames >= STABILITY_FRAMES) targetPair = candidatePair;
-    } else {
-      candidatePair = rawPair;
-      candidateFrames = 1;
-    }
-
-    if (currentTime - lastPairStep >= STEP_INTERVAL_MS) {
-      if (displayedPair < targetPair) { displayedPair++; lastPairStep = currentTime; }
-      else if (displayedPair > targetPair) { displayedPair--; lastPairStep = currentTime; }
-    }
-
-    int rowsLit = (displayedPair + 1) * 2;  // 2, 4, 6, or 8 rows
-    for (int row = 8 - rowsLit; row < 8; row++) {
-      for (int col = 0; col < 8; col++) {
-        int ledIndex = row * 8 + col;
-        uint8_t hue = map(row, 0, 7, 0, 40);  // Red to orange
-        leds_r[ledIndex] = CHSV(hue, 255, 180);
-      }
-    }
-    FastLED.show();
-  }
-}
-
-void processBattleMode() {
-  // BATTLE MODE: Two players, each controls one sensor
-  // Player 1 = CH0, Player 2 = CH1
-  // Each plays notes, LEDs show who's louder/more active
-
-  unsigned long currentTime = millis();
-
-  if (sensor_ch0_initialized) readDistanceGrid(0);
-  if (sensor_ch1_initialized) readDistanceGrid(1);
-
-  // Both players use the same C major scale (C4..C5) from MusicNotes.
-
-  // --- PLAYER 1 (CH0): Play on string voice ---
-  int p1Row = -1;
-  float p1Dist = 9999;
-  int p1Zones = 0;
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t d = distanceGrid_ch0[row][col];
-      if (d < GRID_ZONE_THRESHOLD && d > 50) {
-        p1Zones++;
-        if (d < p1Dist) { p1Dist = d; p1Row = row; }
-      }
-    }
-  }
-
-  if (p1Row >= 0) {
-    float freq = MusicNotes::midiToFreq(MusicNotes::MAJOR_SCALE_C4[p1Row]);
-    float vel = constrain(1.0 - (p1Dist / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
-    battleFreq[0] = freq;
-    battleVol[0] = vel;
-    stringFilter.frequency(freq * 2.5);
-    stringVoice.noteOn(freq, vel);
-    stringEnvelope.noteOn();
-    noteActive = true;
-    mixer1.gain(0, vel * masterVolume);
-  } else {
-    battleVol[0] *= 0.9;
-  }
-
-  // --- PLAYER 2 (CH1): Play on drum voice (different timbre) ---
-  int p2Row = -1;
-  float p2Dist = 9999;
-  int p2Zones = 0;
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t d = distanceGrid_ch1[row][col];
-      if (d < GRID_ZONE_THRESHOLD && d > 50) {
-        p2Zones++;
-        if (d < p2Dist) { p2Dist = d; p2Row = row; }
-      }
-    }
-  }
-
-  if (p2Row >= 0) {
-    float freq = MusicNotes::midiToFreq(MusicNotes::MAJOR_SCALE_C4[p2Row]);
-    float vel = constrain(1.0 - (p2Dist / (float)GRID_ZONE_THRESHOLD), 0.3, 1.0);
-    battleFreq[1] = freq;
-    battleVol[1] = vel;
-    // Use snare for P2 timbre
-    snareDrum.frequency(freq);
-    snareDrum.noteOn();
-    mixer1.gain(2, vel * masterVolume);
-  } else {
-    battleVol[1] *= 0.9;
-  }
-
-  // --- Score: who's more active ---
-  if (p1Zones > p2Zones + 3) battleScore[0] = min(battleScore[0] + 1, 64);
-  else if (p2Zones > p1Zones + 3) battleScore[1] = min(battleScore[1] + 1, 64);
-
-  // --- LED VISUALIZATION ---
-  if (ledVisualizationEnabled) {
-    clearAllLEDs();
-    int p1Bar = constrain(battleScore[0] / 8, 0, 7);
-    int p2Bar = constrain(battleScore[1] / 8, 0, 7);
-
-    for (int row = 0; row < 8; row++) {
-      // Left matrix = Player 1 (blue)
-      for (int col = 0; col < 8; col++) {
-        int ledIndex = row * 8 + col;
-        if (p1Row >= 0 && row == p1Row) {
-          leds[ledIndex] = CRGB(0, 100, 255);  // Bright blue
-        } else if (row <= p1Bar) {
-          leds[ledIndex] = CRGB(0, 20, 60);  // Dim score bar
-        }
-      }
-      // Right matrix = Player 2 (red)
-      for (int col = 0; col < 8; col++) {
-        int ledIndex = row * 8 + col;
-        if (p2Row >= 0 && row == p2Row) {
-          leds_r[ledIndex] = CRGB(255, 50, 0);  // Bright orange-red
-        } else if (row <= p2Bar) {
-          leds_r[ledIndex] = CRGB(60, 10, 0);  // Dim score bar
-        }
-      }
-    }
-    FastLED.show();
-  }
-}
+// Per-mode processors live in src/modes/*.cpp now. The big function bodies
+// (processDualLoop, processChordJam, processBassMachine, processBattleMode,
+// and the BACKSTAGE / BACKSTAGE_2 inline blocks) were all moved out as part
+// of Phase 4a and dispatched from loop() through their namespaces above.
 
 // Thin wrappers around lib/ToFGrid: route CH0 to Wire and CH1 to Wire1, and
 // hand each channel its own buffer. The library owns the sensor instances,
@@ -994,9 +331,10 @@ void switchToMode(PlayMode newMode) {
   snareDrum.secondMix(0.5);
   snareDrum.pitchMod(0.3);
 
-  // Mode-specific initialization. Each branch resets the state owned by
-  // that mode and (if needed) re-reads the sensors so the new mode starts
-  // with fresh data instead of whatever was left over.
+  // Mode-specific initialization. Each mode's enter() resets the state it
+  // owns; the orchestrator just handles the shared scaffolding (boot the
+  // sensors lazily if BACKSTAGE needs them, re-read the grids so the new
+  // mode starts with fresh data, blank the LEDs).
   if (currentMode == MODE_BACKSTAGE) {
     Serial.println(">> Mode: BACKSTAGE  (CH0->LEFT, CH1->RIGHT)");
     if (!sensor_ch0_initialized) sensor_ch0_initialized = initDistanceSensor(0);
@@ -1004,61 +342,32 @@ void switchToMode(PlayMode newMode) {
     panicMute();
     clearAllLEDs();
     FastLED.show();
-    delay(100);
   } else if (currentMode == MODE_BACKSTAGE_2) {
     Serial.println(">> Mode: BACKSTAGE 2  (LED-only animation)");
     panicMute();
     clearAllLEDs();
     FastLED.show();
-    delay(100);
   } else if (currentMode == MODE_CHORD_JAM) {
     Serial.println(">> Mode: CHORD JAM  (left=chord, right=strum)");
-    chordJamIndex = 0;
-    chordJamLastStrum = 0;
+    ChordJam::enter();
     if (sensor_ch0_initialized) readDistanceGrid(0);
     if (sensor_ch1_initialized) readDistanceGrid(1);
-    delay(100);
   } else if (currentMode == MODE_DUAL_LOOP) {
     Serial.println(">> Mode: DUAL LOOP  (left=melody, right=drums)");
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        dualLoopMelody[r][c]     = false;
-        dualLoopDrums[r][c]      = false;
-        dualLoopTouchL[r][c]     = false;
-        dualLoopTouchR[r][c]     = false;
-        dualLoopTouchTimeL[r][c] = 0;
-        dualLoopTouchTimeR[r][c] = 0;
-      }
-    }
-    dualLoopStep = 0;
-    dualLoopLastStep = 0;
+    DualLoop::enter();
     clearAllLEDs();
-    delay(100);
   } else if (currentMode == MODE_BASS_MACHINE) {
     Serial.println(">> Mode: BASS  (left=pattern, right=filter wah)");
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        bassGrid[r][c]       = false;
-        bassTouchState[r][c] = false;
-        bassTouchTime[r][c]  = 0;
-      }
-    }
-    bassStep = 0;
-    bassLastStep = 0;
-    bassFilterFreq = 400.0;
+    BassMachine::enter();
     if (sensor_ch0_initialized) readDistanceGrid(0);
     if (sensor_ch1_initialized) readDistanceGrid(1);
-    delay(100);
   } else if (currentMode == MODE_BATTLE_MODE) {
     Serial.println(">> Mode: BATTLE  (P1=CH0, P2=CH1)");
-    battleScore[0] = 0;
-    battleScore[1] = 0;
-    battleVol[0]   = 0;
-    battleVol[1]   = 0;
+    Battle::enter();
     if (sensor_ch0_initialized) readDistanceGrid(0);
     if (sensor_ch1_initialized) readDistanceGrid(1);
-    delay(100);
   }
+  delay(100);
 
   panicMute();  // Mute when switching modes
   updateOLEDDisplay();  // Update display
@@ -1096,39 +405,24 @@ void handleEncoderButton() {
 
   if (currentMode == MODE_DUAL_LOOP) {
     Serial.println(">> DUAL LOOP: Clearing all layers!");
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        dualLoopMelody[r][c] = false;
-        dualLoopDrums[r][c]  = false;
-      }
-    }
-    dualLoopStep = 0;
-    panicMute();
-    clearAllLEDs();
-    FastLED.show();
+    DualLoop::clear();
   } else if (currentMode == MODE_CHORD_JAM) {
     Serial.println(">> CHORD JAM: Reset!");
-    chordJamIndex = 0;
-    panicMute();
-    clearAllLEDs();
-    FastLED.show();
+    ChordJam::clear();
   } else if (currentMode == MODE_BASS_MACHINE) {
     Serial.println(">> BASS: Clearing pattern!");
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) bassGrid[r][c] = false;
-    }
-    bassStep = 0;
-    panicMute();
-    clearAllLEDs();
-    FastLED.show();
+    BassMachine::clear();
   } else if (currentMode == MODE_BATTLE_MODE) {
     Serial.println(">> BATTLE: Score reset!");
-    battleScore[0] = 0;
-    battleScore[1] = 0;
-    panicMute();
-    clearAllLEDs();
-    FastLED.show();
+    Battle::clear();
+  } else {
+    // BACKSTAGE / BACKSTAGE_2 have no per-mode state to clear; just blank.
+    updateOLEDDisplay();
+    return;
   }
 
+  panicMute();
+  clearAllLEDs();
+  FastLED.show();
   updateOLEDDisplay();
 }
