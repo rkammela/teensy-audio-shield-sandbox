@@ -25,13 +25,12 @@
 #include <SerialFlash.h>
 #include <SparkFun_VL53L5CX_Library.h>
 #include <FastLED.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <Encoder.h>
 
 #include "Config.h"
 #include "MusicNotes.h"
 #include "LedMatrix.h"
+#include "OledStatus.h"
 
 // ============================================================================
 // AUDIO OBJECT DECLARATIONS
@@ -141,8 +140,7 @@ CRGB leds_r[NUM_LEDS];      // Right LED matrix array
 // up its matrices so we can blank the panels for "stage" demos.
 bool ledVisualizationEnabled = true;
 
-// OLED display (geometry / I2C address live in Config.h).
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// OLED display instance now lives inside lib/OledStatus.
 
 // Rotary encoder (pin assignments live in Config.h).
 Encoder knob(ENCODER_PIN_A, ENCODER_PIN_B);
@@ -237,17 +235,7 @@ void setup() {
   Serial.println(sensor_ch1_initialized ? "   CH1 initialization SUCCESS" : "   CH1 initialization FAILED");
 
   // Brief "Ready!" flash before normal UI takes over
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(40, 0);
-  display.println("AURA");
-  display.setTextSize(2);
-  const char* ready = "Ready!";
-  int readyW = strlen(ready) * 12;  // size-2 font ~ 12 px per char
-  display.setCursor((128 - readyW) / 2, 28);
-  display.println(ready);
-  display.display();
+  OledStatus::showSplash("Ready!");
   delay(500);
 
   lastUpdateTime = millis();
@@ -1167,122 +1155,22 @@ void clearAllLEDs() {
 // OLED DISPLAY FUNCTIONS
 // ============================================================================
 
+// Thin wrappers around lib/OledStatus so existing call sites stay unchanged.
+// The library owns the Adafruit_SSD1306 instance and all rendering math.
 void setupOLED() {
-  // Initialize OLED display on I2C bus (Wire - shared with VL53L5CX CH0)
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+  if (!OledStatus::begin(OLED_ADDR)) {
     Serial.println("ERROR: SSD1306 OLED allocation failed!");
-    // Continue anyway - serial interface still works
   } else {
     Serial.println("OLED display found at 0x3C");
   }
-
-  display.clearDisplay();
-
-  // Yellow section (0-15 pixels): "AURA" in big letters, centered
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  // "AURA" is 4 chars * 12 pixels wide (textSize 2) = 48 pixels
-  // Center: (128 - 48) / 2 = 40
-  display.setCursor(40, 0);
-  display.println("AURA");
-
-  display.display();
 }
 
 void showLoadingScreen(const char* label, int step, int total) {
-  // Boot-time progress screen. Yellow band keeps the "AURA" title, blue band
-  // shows current step name and a progress bar. Safe to call before any
-  // sensor/LED is up â€” only requires setupOLED() to have run.
-  display.clearDisplay();
-
-  // Yellow section: AURA title (same position as updateOLEDDisplay)
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(40, 0);
-  display.println("AURA");
-
-  // Blue section, size-1 text
-  display.setTextSize(1);
-
-  // "Loading..." centered
-  const char* loading = "Loading...";
-  int loadingWidth = strlen(loading) * 6;  // size-1 font â‰ˆ 6 px per char
-  display.setCursor((128 - loadingWidth) / 2, 20);
-  display.println(loading);
-
-  // Current step: "[step/total] label" centered
-  char stepStr[32];
-  snprintf(stepStr, sizeof(stepStr), "[%d/%d] %s", step, total, label);
-  int stepWidth = strlen(stepStr) * 6;
-  int stepX = (128 - stepWidth) / 2;
-  if (stepX < 0) stepX = 0;
-  display.setCursor(stepX, 34);
-  display.println(stepStr);
-
-  // Progress bar (outlined rectangle with a filled portion)
-  const int barX = 14, barY = 50, barW = 100, barH = 8;
-  display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
-  if (total > 0) {
-    int fillW = (barW - 2) * step / total;
-    if (fillW > 0) display.fillRect(barX + 1, barY + 1, fillW, barH - 2, SSD1306_WHITE);
-  }
-
-  display.display();
+  OledStatus::showLoading(label, step, total);
 }
 
 void updateOLEDDisplay() {
-  display.clearDisplay();
-
-  // ===== YELLOW SECTION (pixels 0-15): "AURA" title =====
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  // "AURA" is 4 chars * 12 pixels wide (textSize 2) = 48 pixels
-  // Center: (128 - 48) / 2 = 40
-  display.setCursor(40, 0);
-  display.println("AURA");
-
-  // ===== BLUE SECTION (pixels 16-63): Current mode, centered, big =====
-  const char* modeStr = getModeString(currentMode);
-
-  // Size-2 font is ~12 px per char; OLED is 128 px wide -> max 10 chars/line.
-  // Long labels (e.g. "UNDER THE HOOD") get wrapped onto two lines, split at
-  // the last space that lets both halves fit. Otherwise render on one line.
-  const int charW = 12;
-  int len = strlen(modeStr);
-  display.setTextSize(2);
-  if (len * charW <= 128) {
-    int xPos = (128 - len * charW) / 2;
-    display.setCursor(xPos, 28);
-    display.println(modeStr);
-  } else {
-    int splitAt = -1;
-    for (int i = len - 1; i >= 0; i--) {
-      if (modeStr[i] == ' ' && i * charW <= 128 && (len - i - 1) * charW <= 128) {
-        splitAt = i;
-        break;
-      }
-    }
-    if (splitAt < 0) {
-      display.setCursor(0, 28);
-      display.println(modeStr);
-    } else {
-      char line1[20], line2[20];
-      int l1 = splitAt, l2 = len - splitAt - 1;
-      strncpy(line1, modeStr, l1); line1[l1] = '\0';
-      strncpy(line2, modeStr + splitAt + 1, l2); line2[l2] = '\0';
-      display.setCursor((128 - l1 * charW) / 2, 20);
-      display.println(line1);
-      display.setCursor((128 - l2 * charW) / 2, 38);
-      display.println(line2);
-    }
-  }
-
-  // ===== BOTTOM NOTE (small text) =====
-  display.setTextSize(1);
-  display.setCursor(0, 56);  // Bottom of screen
-  display.println("Turn to switch modes");
-
-  display.display();
+  OledStatus::showStatus(getModeString(currentMode), "Turn to switch modes");
 }
 
 const char* getModeString(PlayMode mode) {
