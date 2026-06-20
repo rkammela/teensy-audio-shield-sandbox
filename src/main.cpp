@@ -31,6 +31,7 @@
 
 #include "Config.h"
 #include "MusicNotes.h"
+#include "LedMatrix.h"
 
 // ============================================================================
 // AUDIO OBJECT DECLARATIONS
@@ -171,8 +172,6 @@ bool initDistanceSensor(uint8_t channel);
 void readDistanceGrid(uint8_t channel);
 void setupLEDs();
 void clearAllLEDs();
-CRGB distanceToColor(uint16_t distance_mm);
-int xyToLEDIndex(int row, int col);
 void setupOLED();
 void showLoadingScreen(const char* label, int step, int total);
 void updateOLEDDisplay();
@@ -293,12 +292,12 @@ void loop() {
         if (sensor_ch1_initialized) readDistanceGrid(1);
         for (int row = 0; row < MATRIX_HEIGHT; row++) {
           for (int col = 0; col < MATRIX_WIDTH; col++) {
-            int ledIndex = xyToLEDIndex(row, col);
+            int ledIndex = LedMatrix::xyToLEDIndex(row, col);
             leds[ledIndex]   = sensor_ch0_initialized
-                                 ? distanceToColor(distanceGrid_ch0[row][col])
+                                 ? LedMatrix::distanceToColor(distanceGrid_ch0[row][col])
                                  : CRGB::Black;
             leds_r[ledIndex] = sensor_ch1_initialized
-                                 ? distanceToColor(distanceGrid_ch1[row][col])
+                                 ? LedMatrix::distanceToColor(distanceGrid_ch1[row][col])
                                  : CRGB::Black;
           }
         }
@@ -339,7 +338,7 @@ void loop() {
           for (int col = 0; col < 8; col++) {
             bool isHeart = (row >= 2 && row <= 6 && col >= 1 && col <= 6)
                              && heart[row - 2][col - 1];
-            leds[xyToLEDIndex(row, col)] =
+            leds[LedMatrix::xyToLEDIndex(row, col)] =
               isHeart ? CRGB(heartBright, 0, 0) : CRGB::Black;
           }
         }
@@ -355,7 +354,7 @@ void loop() {
           int r1 = min(prevRow, waveRow);
           int r2 = max(prevRow, waveRow);
           for (int r = r1; r <= r2; r++) {
-            leds[xyToLEDIndex(r, c)] = color;
+            leds[LedMatrix::xyToLEDIndex(r, c)] = color;
           }
         }
 
@@ -393,7 +392,7 @@ void loop() {
           CRGB on = CHSV(hue, 255, 200);
           for (int row = 0; row < 8; row++) {
             bool lit = (row < 7) && ((colBits >> row) & 1);
-            leds_r[xyToLEDIndex(row, c)] = lit ? on : CRGB::Black;
+            leds_r[LedMatrix::xyToLEDIndex(row, c)] = lit ? on : CRGB::Black;
           }
         }
 
@@ -1156,56 +1155,12 @@ void setupLEDs() {
   Serial.println(" LEDs (8x8, serpentine layout)");
 }
 
+// Blank both LED matrices and push the result to the panels. Pixel-level
+// math lives in lib/LedMatrix; only the project knows it has two buffers.
 void clearAllLEDs() {
-  // Turn off all LEDs on both matrices
-  for (int i = 0; i < NUM_LEDS; i++) {
-    leds[i] = CRGB::Black;
-    leds_r[i] = CRGB::Black;
-  }
+  LedMatrix::clearMatrix(leds,   NUM_LEDS);
+  LedMatrix::clearMatrix(leds_r, NUM_LEDS);
   FastLED.show();
-}
-
-CRGB distanceToColor(uint16_t distance_mm) {
-  // Map distance values to colors for LED visualization
-  // Color scheme:
-  //   < 200mm: Bright RED/YELLOW (very close - target detected)
-  //   200-400mm: ORANGE (close)
-  //   400-600mm: GREEN (medium distance)
-  //   600-800mm: BLUE (far)
-  //   > 800mm: DIM PURPLE or OFF (very far / no object)
-
-  if (distance_mm < 200) {
-    // Very close - bright red
-    return CRGB::Red;
-  } else if (distance_mm < 400) {
-    // Close - orange
-    return CRGB(255, 165, 0);  // Orange (R=255, G=165, B=0)
-  } else if (distance_mm < 600) {
-    // Medium - green
-    return CRGB::Green;
-  } else if (distance_mm < 800) {
-    // Far - blue
-    return CRGB::Blue;
-  } else if (distance_mm < 1000) {
-    // Very far - dim purple
-    return CRGB(64, 0, 64);  // Dim purple (R=64, G=0, B=64)
-  } else {
-    // Out of range or no object - off
-    return CRGB::Black;
-  }
-}
-
-int xyToLEDIndex(int row, int col) {
-  // Convert 2D matrix coordinates to LED index for SERPENTINE layout
-  // Serpentine pattern: even rows go left-to-right, odd rows go right-to-left
-
-  if (row % 2 == 0) {
-    // Even rows (0, 2, 4, 6): left to right
-    return row * MATRIX_WIDTH + col;
-  } else {
-    // Odd rows (1, 3, 5, 7): right to left
-    return row * MATRIX_WIDTH + (MATRIX_WIDTH - 1 - col);
-  }
 }
 
 // ============================================================================
