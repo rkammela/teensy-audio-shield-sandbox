@@ -19,15 +19,15 @@
 // also the menu order, and the wrap-around is defined by MODE_FIRST and
 // MODE_LAST below.
 enum PlayMode {
+  MODE_WELCOME,        // Default boot screen: AURA + pulsing heart, TSA scroll
   MODE_BACKSTAGE,      // Diagnostic: live 8x8 sensor grids on both LED matrices
-  MODE_BACKSTAGE_2,    // LED-only animation (no sensors): pulsing heart + scroll
   MODE_CHORD_JAM,      // Guitar-style: left hand picks chord, right hand strums
   MODE_DUAL_LOOP,      // Layered looper: left = melody grid, right = drum grid
   MODE_BASS_MACHINE,   // 8-step bass line + right-hand filter sweep
   MODE_BATTLE_MODE     // Two-player duel: P1 = CH0, P2 = CH1
 };
 
-#define MODE_FIRST  MODE_BACKSTAGE
+#define MODE_FIRST  MODE_WELCOME
 #define MODE_LAST   MODE_BATTLE_MODE
 
 // ============================================================================

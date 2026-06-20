@@ -1,20 +1,20 @@
 ﻿/*
- * AURA - Touchless Musical Instrument
+ * AURA - Air universal rythm aparatus
  *
- * Hardware:
- *   - Teensy 4.0 + SGTL5000 audio shield (I2S out to headphones / line out)
- *   - 2x SparkFun VL53L5CX time-of-flight sensors (8x8 zones each)
- *   - 2x WS2812B 8x8 NeoPixel matrices (one per hand, serpentine wiring)
- *   - 1x SSD1306 128x64 OLED status display
- *   - 1x rotary encoder + push button for mode select
+ * stuff hooked up:
+ *   teensy 4.0 + audio shield
+ *   2 distance sensors (the 8x8 ones)
+ *   2 led matrixes one per hand
+ *   little oled screen
+ *   a knob with a button on it
  *
- * Modes (cycled with the encoder):
- *   BACKSTAGE     - diagnostic: live sensor grid on both LED matrices
- *   BACKSTAGE 2   - LED-only animation: pulsing heart + scrolling marquee
- *   CHORD JAM     - left hand picks chord, right hand strums
- *   DUAL LOOP     - 8-step looper, left = melody, right = drums
- *   BASS MACHINE  - 8-step bass sequencer with right-hand filter sweep
- *   BATTLE MODE   - two-player duel (P1 = CH0, P2 = CH1)
+ * modes (turn the knob to switch):
+ *   WELCOME - the heart screen at the start
+ *   BACKSTAGE - shows sensor data to see if its working
+ *   CHORD JAM - left hand picks the chord right hand strums it
+ *   DUAL LOOP - loop pedal thing, left is melody right is drums
+ *   BASS MACHINE - bass beat with a wah on the right hand
+ *   BATTLE MODE - 2 player game
  */
 
 #include <Arduino.h>
@@ -34,65 +34,38 @@
 #include "ToFGrid.h"
 #include "SynthVoices.h"
 
+#include "modes/Welcome.h"
 #include "modes/Backstage.h"
 #include "modes/DualLoop.h"
 #include "modes/ChordJam.h"
 #include "modes/BassMachine.h"
 #include "modes/Battle.h"
 
-// ============================================================================
-// GLOBAL VARIABLES
-// ============================================================================
-// All audio objects (oscillators, envelopes, filters, mixer, codec) and the
-// patch-cord graph live in lib/SynthVoices. SynthVoices.h re-declares them
-// with `extern` so this file - and every mode - can keep poking them by
-// their short names.
+// ---- globals ----
 
-// Play mode + master volume. Per-mode private state (sequencer grids, touch
-// latches, step counters, etc.) lives at file scope inside the matching
-// src/modes/*.cpp; this file only owns the truly shared globals declared in
-// include/AuraState.h.
-PlayMode currentMode = MODE_BACKSTAGE;
+PlayMode currentMode = MODE_WELCOME;
 float masterVolume = 1.0;
 
-// VL53L5CX Distance Sensors (8x8 mode)
-// CH0: I2C0 (Wire) - SDA=18, SCL=19
-// CH1: I2C1 (Wire1) - SDA=17, SCL=16
-// The sensor instances now live in lib/ToFGrid; main.cpp just keeps the
-// per-frame buffers (every mode reads grid[row][col] from them directly).
+// the 2 distance sensors. ch0 is the left hand ch1 is the right hand
 bool sensor_ch0_initialized = false;
 bool sensor_ch1_initialized = false;
-uint16_t distanceGrid_ch0[8][8];  // 8x8 distance array for CH0
-uint16_t distanceGrid_ch1[8][8];  // 8x8 distance array for CH1
+uint16_t distanceGrid_ch0[8][8];
+uint16_t distanceGrid_ch1[8][8];
 unsigned long lastSensorRead = 0;
 
-// LED matrices (pin assignments / dimensions live in Config.h).
-// Serpentine layout: row 0 is left-to-right, row 1 is right-to-left, etc.
-CRGB leds[NUM_LEDS];        // Left LED matrix array
-CRGB leds_r[NUM_LEDS];      // Right LED matrix array
+// the 2 led matrixes
+CRGB leds[NUM_LEDS];     // left one
+CRGB leds_r[NUM_LEDS];   // right one
 
-// Global LED visualization gate. Each mode checks this before lighting
-// up its matrices so we can blank the panels for "stage" demos.
+// flip this off if u want the panels dark
 bool ledVisualizationEnabled = true;
 
-// OLED display instance now lives inside lib/OledStatus.
-
-// Rotary encoder state and the Encoder instance now live inside lib/RotaryUI.
-
-// True when a Karplus-Strong string voice is currently sustaining. Lets
-// panicMute() know whether it actually needs to release the envelope.
+// true if a string note is still ringing so we know to shut it off later
 bool noteActive = false;
 
-// Main-loop timer for the fixed-rate sensor + mode update.
 unsigned long lastUpdateTime = 0;
 
-// ============================================================================
-// FUNCTION DECLARATIONS
-// ============================================================================
-
-// Most helper declarations live in include/AuraState.h. Only the bits that
-// are still defined in this file - the mode-switching glue and a couple of
-// boot-time wrappers - need forward decls here.
+// forward decls
 void setupLEDs();
 void clearAllLEDs();
 void setupOLED();
@@ -103,25 +76,19 @@ void handleEncoderButton();
 void switchToMode(PlayMode newMode);
 const char* getModeString(PlayMode mode);
 
-// ============================================================================
-// SETUP
-// ============================================================================
+// ---- setup ----
 
 void setup() {
   Serial.begin(115200);
 
-  // Wait a moment for serial to initialize
-  delay(1000);
+  delay(1000);  // give serial a sec
 
   Serial.println("\n=== Teensy Touchless Instrument (Simulated ToF) ===");
 
-  // ---- Step 1/6: Audio engine ----
-  // lib/SynthVoices brings up AudioMemory, the SGTL5000, mixer gains, and
-  // every voice's parameter defaults in one call.
+  // boot everything one thing at a time and show a little loading bar on the oled so u know its alive
   SynthVoices::begin(masterVolume);
   Serial.println("Audio system initialized!");
 
-  // ---- Step 2/6: OLED (bring up early so we can show progress) ----
   setupOLED();
   Serial.println("OLED display initialized!");
   showLoadingScreen("Audio", 1, 6);
@@ -129,57 +96,50 @@ void setup() {
   showLoadingScreen("OLED", 2, 6);
   delay(150);
 
-  // ---- Step 3/6: LED matrices ----
   showLoadingScreen("LEDs", 3, 6);
   setupLEDs();
   Serial.println("LED system initialized!");
   delay(150);
 
-  // ---- Step 4/6: Rotary encoder ----
   showLoadingScreen("Encoder", 4, 6);
   RotaryUI::begin(ENCODER_PIN_A, ENCODER_PIN_B, ENCODER_BUTTON, DEBOUNCE_DELAY);
   Serial.println("Rotary encoder initialized!");
   delay(150);
 
-  // ---- Step 5/6: VL53L5CX CH0 (left hand sensor on Wire) ----
+  // sensors go last becuase they take the longest to wake up
   showLoadingScreen("Sensor CH0", 5, 6);
   Serial.println("Initializing VL53L5CX CH0 (I2C0)...");
   sensor_ch0_initialized = initDistanceSensor(0);
   Serial.println(sensor_ch0_initialized ? "   CH0 initialization SUCCESS" : "   CH0 initialization FAILED");
 
-  // ---- Step 6/6: VL53L5CX CH1 (right hand sensor on Wire1) ----
   showLoadingScreen("Sensor CH1", 6, 6);
   Serial.println("Initializing VL53L5CX CH1 (I2C1)...");
   sensor_ch1_initialized = initDistanceSensor(1);
   Serial.println(sensor_ch1_initialized ? "   CH1 initialization SUCCESS" : "   CH1 initialization FAILED");
 
-  // Brief "Ready!" flash before normal UI takes over
+  // quick Ready! flash then the regular screen shows up
   OledStatus::showSplash("Ready!");
   delay(500);
 
   lastUpdateTime = millis();
 
-  // Normal display takes over
   updateOLEDDisplay();
 }
 
 
-// ============================================================================
-// MAIN LOOP
-// ============================================================================
+// ---- main loop ----
 
 void loop() {
-  // Handle rotary encoder input
+  // check the knob first
   handleEncoder();
   handleEncoderButton();
 
-  // Update sensor simulation and audio at regular intervals
+  // run the active mode every so often
   unsigned long currentTime = millis();
   if (currentTime - lastUpdateTime >= UPDATE_INTERVAL_MS) {
     lastUpdateTime = currentTime;
 
-    // Dispatch to the active mode. Each mode owns its own state and is
-    // responsible for reading sensors + driving audio + LEDs.
+    // just call whichever mode is on rn
     if (currentMode == MODE_DUAL_LOOP) {
       DualLoop::process();
     } else if (currentMode == MODE_CHORD_JAM) {
@@ -190,30 +150,21 @@ void loop() {
       Battle::process();
     } else if (currentMode == MODE_BACKSTAGE) {
       Backstage::process(currentTime);
-    } else if (currentMode == MODE_BACKSTAGE_2) {
-      Backstage::processAnimation(currentTime);
+    } else if (currentMode == MODE_WELCOME) {
+      Welcome::process(currentTime);
     }
   }
 }
 
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
+// ---- helpers ----
 
-
-// Kill any audio still playing. Called when switching modes and when the
-// player presses the encoder button to "reset" the current mode. The
-// envelope releases live in lib/SynthVoices; the noteActive flag is a
-// project-side state shadow tied to the Karplus-Strong voice, so we clear
-// it here.
+// shut up any noise thats still playing
 void panicMute() {
   SynthVoices::panic();
   noteActive = false;
 }
 
-// Thin wrappers around lib/ToFGrid: route CH0 to Wire and CH1 to Wire1, and
-// hand each channel its own buffer. The library owns the sensor instances,
-// ranging configuration, and the 180-degree flip applied to every frame.
+// turn on one of the distance sensors. ch0 uses Wire and ch1 uses Wire1
 bool initDistanceSensor(uint8_t channel) {
   TwoWire& bus = (channel == 0) ? Wire : Wire1;
   Serial.print("Initializing VL53L5CX CH"); Serial.print(channel); Serial.println(" ...");
@@ -226,20 +177,19 @@ bool initDistanceSensor(uint8_t channel) {
   return ok;
 }
 
+// grab a frame of distances from one sensor
 void readDistanceGrid(uint8_t channel) {
   uint16_t (*grid)[8] = (channel == 0) ? distanceGrid_ch0 : distanceGrid_ch1;
   ToFGrid::readFrame(channel, grid);
 }
 
-// ============================================================================
-// LED FUNCTIONS
-// ============================================================================
+// ---- leds ----
 
 void setupLEDs() {
-  // Initialize FastLED library -- two 8x8 matrices
-  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);    // Left matrix (pin 0)
-  FastLED.addLeds<LED_TYPE, LED_PIN_R, COLOR_ORDER>(leds_r, NUM_LEDS); // Right matrix (pin 1)
-  FastLED.setBrightness(50);  // Set brightness (0-255), 50 is moderate
+  // 2 matrixes one on each pin
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.addLeds<LED_TYPE, LED_PIN_R, COLOR_ORDER>(leds_r, NUM_LEDS);
+  FastLED.setBrightness(50);  // not too bright
   clearAllLEDs();
   Serial.println("FastLED initialized: Left matrix on pin 0, Right matrix on pin 1");
   Serial.print("Each matrix: ");
@@ -247,20 +197,15 @@ void setupLEDs() {
   Serial.println(" LEDs (8x8, serpentine layout)");
 }
 
-// Blank both LED matrices and push the result to the panels. Pixel-level
-// math lives in lib/LedMatrix; only the project knows it has two buffers.
+// blank out both matrixes
 void clearAllLEDs() {
   LedMatrix::clearMatrix(leds,   NUM_LEDS);
   LedMatrix::clearMatrix(leds_r, NUM_LEDS);
   FastLED.show();
 }
 
-// ============================================================================
-// OLED DISPLAY FUNCTIONS
-// ============================================================================
+// ---- oled screen ----
 
-// Thin wrappers around lib/OledStatus so existing call sites stay unchanged.
-// The library owns the Adafruit_SSD1306 instance and all rendering math.
 void setupOLED() {
   if (!OledStatus::begin(OLED_ADDR)) {
     Serial.println("ERROR: SSD1306 OLED allocation failed!");
@@ -277,10 +222,11 @@ void updateOLEDDisplay() {
   OledStatus::showStatus(getModeString(currentMode), "Turn to switch modes");
 }
 
+// gives a name for whatever mode is on right now
 const char* getModeString(PlayMode mode) {
   switch (mode) {
+    case MODE_WELCOME:      return "WELCOME";
     case MODE_BACKSTAGE:    return "BACKSTAGE";
-    case MODE_BACKSTAGE_2:  return "BACKSTAGE 2";
     case MODE_CHORD_JAM:    return "CHORD JAM";
     case MODE_DUAL_LOOP:    return "DUAL LOOP";
     case MODE_BASS_MACHINE: return "BASS";
@@ -289,17 +235,12 @@ const char* getModeString(PlayMode mode) {
   }
 }
 
-// ============================================================================
-// MODE SWITCHING
-// ============================================================================
+// ---- mode switching ----
 
-// Re-entrancy guard so a fast double-click on the encoder button can't fire
-// two mode-enter blocks on top of each other. File-local: only switchToMode
-// touches it.
+// stops a really fast double click from running 2 switches on top of each other
 static bool isSwitchingMode = false;
 
 void switchToMode(PlayMode newMode) {
-  // Prevent overlapping mode switches
   if (isSwitchingMode) {
     Serial.println(">> Mode switch already in progress, ignoring...");
     return;
@@ -311,16 +252,12 @@ void switchToMode(PlayMode newMode) {
   Serial.print(">> switchToMode() called - New mode: ");
   Serial.println(getModeString(currentMode));
 
-  // Reset snareDrum to drum-like defaults. Modes that want a melodic timbre
-  // (e.g. DRONE+SOLO) override these in their own mode-enter block below.
+  // put the snare back to a drum sound incase another mode changed it
   snareDrum.length(150);
   snareDrum.secondMix(0.5);
   snareDrum.pitchMod(0.3);
 
-  // Mode-specific initialization. Each mode's enter() resets the state it
-  // owns; the orchestrator just handles the shared scaffolding (boot the
-  // sensors lazily if BACKSTAGE needs them, re-read the grids so the new
-  // mode starts with fresh data, blank the LEDs).
+  // set up whatever the new mode needs
   if (currentMode == MODE_BACKSTAGE) {
     Serial.println(">> Mode: BACKSTAGE  (CH0->LEFT, CH1->RIGHT)");
     if (!sensor_ch0_initialized) sensor_ch0_initialized = initDistanceSensor(0);
@@ -328,8 +265,8 @@ void switchToMode(PlayMode newMode) {
     panicMute();
     clearAllLEDs();
     FastLED.show();
-  } else if (currentMode == MODE_BACKSTAGE_2) {
-    Serial.println(">> Mode: BACKSTAGE 2  (LED-only animation)");
+  } else if (currentMode == MODE_WELCOME) {
+    Serial.println(">> Mode: WELCOME  (LED-only boot/idle screen)");
     panicMute();
     clearAllLEDs();
     FastLED.show();
@@ -355,20 +292,16 @@ void switchToMode(PlayMode newMode) {
   }
   delay(100);
 
-  panicMute();  // Mute when switching modes
-  updateOLEDDisplay();  // Update display
+  panicMute();   // make sure nothing is still playing
+  updateOLEDDisplay();
 
-  isSwitchingMode = false;  // Allow mode switches again
+  isSwitchingMode = false;
   Serial.println(">> switchToMode() complete");
 }
 
-// ============================================================================
-// ROTARY ENCODER FUNCTIONS
-// ============================================================================
+// ---- knob stuff ----
 
-// Map rotation events from lib/RotaryUI to mode transitions. On this build
-// the encoder reports CW as a NEGATIVE detent count, so a right-turn (CW)
-// advances to the next enum value with wraparound at MODE_LAST/MODE_FIRST.
+// turning the knob switches modes and it wraps around at the ends
 void handleEncoder() {
   int detents = RotaryUI::pollRotation();
   if (detents == 0) return;
@@ -384,8 +317,7 @@ void handleEncoder() {
   }
 }
 
-// Map button-press events from lib/RotaryUI to mode-specific "clear" actions
-// so the player can restart a pattern without leaving the current mode.
+// pressing the knob restarts the current mode (like clear the pattern)
 void handleEncoderButton() {
   if (!RotaryUI::pollButtonPressed()) return;
 
@@ -402,7 +334,7 @@ void handleEncoderButton() {
     Serial.println(">> BATTLE: Score reset!");
     Battle::clear();
   } else {
-    // BACKSTAGE / BACKSTAGE_2 have no per-mode state to clear; just blank.
+    // welcome and backstage dont have anything to clear so just refresh the oled
     updateOLEDDisplay();
     return;
   }

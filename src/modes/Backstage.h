@@ -1,13 +1,13 @@
 /*
- * Backstage modes - diagnostic + LED-art views (no audio).
+ * Backstage mode - diagnostic view (no audio).
  *
- *   Backstage::process(currentTime)          - dual-sensor distance heatmap
- *   Backstage::processAnimation(currentTime) - LED-only pulsing heart + EKG
- *                                              on the left matrix, rainbow
- *                                              "AURA TSA 2026" text scroll
- *                                              on the right matrix
+ *   Backstage::process(currentTime) - dual-sensor distance heatmap; CH0
+ *                                     drives the LEFT matrix, CH1 drives
+ *                                     the RIGHT matrix. Useful for verifying
+ *                                     sensor orientation and detection range.
  *
- * Both are called from main.cpp's loop() when the matching mode is active.
+ * Called from main.cpp's loop() when MODE_BACKSTAGE is active. The
+ * LED-only Welcome animation lives in its own file (src/modes/Welcome.cpp).
  */
 
 #ifndef AURA_MODES_BACKSTAGE_H
@@ -17,7 +17,6 @@
 
 namespace Backstage {
   void process(unsigned long currentTime);
-  void processAnimation(unsigned long currentTime);
 }
 
 #endif // AURA_MODES_BACKSTAGE_H
