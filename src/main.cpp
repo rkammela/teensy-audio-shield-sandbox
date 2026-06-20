@@ -23,7 +23,6 @@
 #include <SPI.h>
 #include <SD.h>
 #include <SerialFlash.h>
-#include <SparkFun_VL53L5CX_Library.h>
 #include <FastLED.h>
 
 #include "Config.h"
@@ -31,6 +30,7 @@
 #include "LedMatrix.h"
 #include "OledStatus.h"
 #include "RotaryUI.h"
+#include "ToFGrid.h"
 
 // ============================================================================
 // AUDIO OBJECT DECLARATIONS
@@ -122,8 +122,8 @@ int   battleScore[2] = {0, 0};
 // VL53L5CX Distance Sensors (8x8 mode)
 // CH0: I2C0 (Wire) - SDA=18, SCL=19
 // CH1: I2C1 (Wire1) - SDA=17, SCL=16
-SparkFun_VL53L5CX sensor_ch0;
-SparkFun_VL53L5CX sensor_ch1;
+// The sensor instances now live in lib/ToFGrid; main.cpp just keeps the
+// per-frame buffers (every mode reads grid[row][col] from them directly).
 bool sensor_ch0_initialized = false;
 bool sensor_ch1_initialized = false;
 uint16_t distanceGrid_ch0[8][8];  // 8x8 distance array for CH0
@@ -436,40 +436,12 @@ void panicMute() {
   noteActive = false;
 }
 
-// Walk an 8x8 distance grid and report where the player's hand is and how
-// much of the grid it covers. A "cell" counts as hand only when its distance
-// is between 50 mm (too close = noise/sensor artifact) and 800 mm.
-//   avgDistance  -> mean distance of the hand cells, in mm
-//   centroidX/Y  -> mean (col, row) of the hand cells (0..7)
-//   activeZones  -> how many cells passed the threshold
+// Thin wrapper around lib/ToFGrid::calculateHandMetrics so existing call
+// sites stay identical. The hand-detection thresholds live inside the
+// library (50..800 mm "hand cell" band).
 void calculateHandMetrics(uint16_t grid[8][8], float& avgDistance,
                           int& centroidX, int& centroidY, int& activeZones) {
-  const int HAND_THRESHOLD = 800;  // mm
-
-  long sumX = 0, sumY = 0, sumDist = 0;
-  int count = 0;
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      uint16_t dist = grid[row][col];
-      if (dist < HAND_THRESHOLD && dist > 50) {
-        sumX    += col;
-        sumY    += row;
-        sumDist += dist;
-        count++;
-      }
-    }
-  }
-  if (count > 0) {
-    centroidX   = sumX / count;
-    centroidY   = sumY / count;
-    avgDistance = (float)sumDist / count;
-    activeZones = count;
-  } else {
-    centroidX   = 4;
-    centroidY   = 4;
-    avgDistance = 2000.0;
-    activeZones = 0;
-  }
+  ToFGrid::calculateHandMetrics(grid, avgDistance, centroidX, centroidY, activeZones);
 }
 
 void processDualLoop() {
@@ -1000,127 +972,24 @@ void processBattleMode() {
   }
 }
 
+// Thin wrappers around lib/ToFGrid: route CH0 to Wire and CH1 to Wire1, and
+// hand each channel its own buffer. The library owns the sensor instances,
+// ranging configuration, and the 180-degree flip applied to every frame.
 bool initDistanceSensor(uint8_t channel) {
-  // Initialize VL53L5CX Time-of-Flight sensor in 8x8 mode
-  // channel: 0 = I2C0 (Wire, SDA=18, SCL=19)
-  //          1 = I2C1 (Wire1, SDA=17, SCL=16)
-
-  if (channel == 0) {
-    Serial.println("Initializing VL53L5CX CH0 (I2C0)...");
-
-    // Initialize I2C at 400 kHz
-    Wire.begin();
-    Wire.setClock(400000);
-
-    // Initialize sensor on Wire (I2C0)
-    // VL53L5CX default I2C address is 0x29 (8-bit: 0x52)
-    // Try with 0x29 directly and explicit Wire reference
-    if (!sensor_ch0.begin(0x29, Wire)) {
-      Serial.println("ERROR: VL53L5CX CH0 not detected!");
-      Serial.println("Check wiring:");
-      Serial.println("  SDA -> Pin 18");
-      Serial.println("  SCL -> Pin 19");
-      Serial.println("  VDD -> 3.3V, GND -> GND");
-      return false;
-    }
-
-    Serial.println("VL53L5CX CH0 detected and initialized!");
-
-    // Set resolution to 8x8 (64 zones)
-    sensor_ch0.setResolution(8*8);
-
-    Serial.println("VL53L5CX CH0 configured for 8x8 mode (64 zones)");
-
-    // Set ranging frequency (Hz)
-    sensor_ch0.setRangingFrequency(10);
-
-    // Start ranging
-    sensor_ch0.startRanging();
-
-    Serial.println("VL53L5CX CH0 ranging started!");
-    Serial.println("Ready to read 8x8 distance grid\n");
-
+  TwoWire& bus = (channel == 0) ? Wire : Wire1;
+  Serial.print("Initializing VL53L5CX CH"); Serial.print(channel); Serial.println(" ...");
+  bool ok = ToFGrid::begin(channel, bus);
+  if (!ok) {
+    Serial.print("ERROR: VL53L5CX CH"); Serial.print(channel); Serial.println(" not detected!");
   } else {
-    Serial.println("Initializing VL53L5CX CH1 (I2C1)...");
-
-    // Initialize I2C1 at 400 kHz
-    Wire1.begin();
-    Wire1.setClock(400000);
-
-    // Initialize sensor on Wire1 (I2C1)
-    // CRITICAL: Must pass BOTH address AND Wire1 reference
-    // VL53L5CX default I2C address is 0x29
-    if (!sensor_ch1.begin(0x29, Wire1)) {
-      Serial.println("ERROR: VL53L5CX CH1 not detected!");
-      Serial.println("Check wiring:");
-      Serial.println("  SDA -> Pin 17");
-      Serial.println("  SCL -> Pin 16");
-      Serial.println("  VDD -> 3.3V, GND -> GND");
-      return false;
-    }
-
-    Serial.println("VL53L5CX CH1 detected and initialized!");
-
-    // Set resolution to 8x8 (64 zones)
-    sensor_ch1.setResolution(8*8);
-
-    Serial.println("VL53L5CX CH1 configured for 8x8 mode (64 zones)");
-
-    // Set ranging frequency (Hz)
-    sensor_ch1.setRangingFrequency(10);
-
-    // Start ranging
-    sensor_ch1.startRanging();
-
-    Serial.println("VL53L5CX CH1 ranging started!");
-    Serial.println("Ready to read 8x8 distance grid\n");
+    Serial.print("VL53L5CX CH"); Serial.print(channel); Serial.println(" ranging started.");
   }
-
-  return true;
+  return ok;
 }
 
 void readDistanceGrid(uint8_t channel) {
-  // Read the 8x8 distance array from VL53L5CX
-  // channel: 0 = CH0 (I2C0), 1 = CH1 (I2C1)
-  // The sensor provides 64 distance measurements in a grid pattern
-
-  SparkFun_VL53L5CX* sensor;
-  uint16_t (*grid)[8];
-
-  if (channel == 0) {
-    sensor = &sensor_ch0;
-    grid = distanceGrid_ch0;
-  } else {
-    sensor = &sensor_ch1;
-    grid = distanceGrid_ch1;
-  }
-
-  VL53L5CX_ResultsData results;
-
-  // Check if new data is ready
-  if (!sensor->isDataReady()) {
-    // No new data yet
-    return;
-  }
-
-  // Get ranging data
-  if (!sensor->getRangingData(&results)) {
-    Serial.print("ERROR: Failed to get ranging data from CH");
-    Serial.println(channel);
-    return;
-  }
-
-  // Copy distance data to our 8x8 grid, rotating 180Â° so that grid[row][col]
-  // matches the user's perceived orientation (top-left as you face the device =
-  // grid[0][0]). The raw sensor frame is mounted rotated 180Â° relative to the
-  // LED matrices, so we flip both axes here once, at the source. Every mode
-  // downstream then sees correctly-oriented data without needing its own flip.
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      int rawIndex = (7 - row) * 8 + (7 - col);
-      grid[row][col] = results.distance_mm[rawIndex];
-    }
-  }
+  uint16_t (*grid)[8] = (channel == 0) ? distanceGrid_ch0 : distanceGrid_ch1;
+  ToFGrid::readFrame(channel, grid);
 }
 
 // ============================================================================
