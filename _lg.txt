@@ -1,3 +1,0 @@
-162ef22 Phase 1 cleanup pt2: remove dead globals, enums, helpers (2131 -> 1575 lines)
-d1294ca Phase 1 cleanup: remove 13 hidden modes, serial command handler, and dead init/dispatch branches (4278 -> 2131 lines)
-7a27c7c Pre-refactor checkpoint: menu reordered, BASS LED smoothing, BACKSTAGE 2 heart+EKG and AURA TSA 2026 marquee
