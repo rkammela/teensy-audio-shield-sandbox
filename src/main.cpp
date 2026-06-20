@@ -31,57 +31,15 @@
 #include "OledStatus.h"
 #include "RotaryUI.h"
 #include "ToFGrid.h"
-
-// ============================================================================
-// AUDIO OBJECT DECLARATIONS
-// ============================================================================
-
-// String voice (Karplus-Strong)
-AudioSynthKarplusStrong  stringVoice;
-AudioEffectEnvelope      stringEnvelope;
-AudioFilterStateVariable stringFilter;
-
-// Drum synthesizers
-AudioSynthSimpleDrum     kickDrum;
-AudioSynthSimpleDrum     snareDrum;
-
-// Hi-hat: noise + envelope
-AudioSynthNoiseWhite     noiseWhite;
-AudioEffectEnvelope      hatEnvelope;
-
-// Mixer and output
-AudioMixer4              mixer1;         // Main mixer
-AudioOutputI2S           i2s1;           // I2S output (DAC)
-
-// Audio shield control
-AudioControlSGTL5000     sgtl5000_1;
-
-// ============================================================================
-// AUDIO CONNECTIONS (Patch Cords)
-// ============================================================================
-
-// String voice: stringVoice -> envelope -> filter -> mixer channel 0
-AudioConnection          patchCord1(stringVoice, stringEnvelope);
-AudioConnection          patchCord2(stringEnvelope, 0, stringFilter, 0);
-AudioConnection          patchCord3(stringFilter, 0, mixer1, 0);
-
-// Kick drum -> mixer channel 1
-AudioConnection          patchCord4(kickDrum, 0, mixer1, 1);
-
-// Snare drum -> mixer channel 2
-AudioConnection          patchCord5(snareDrum, 0, mixer1, 2);
-
-// Hi-hat: noise -> envelope -> mixer channel 3
-AudioConnection          patchCord6(noiseWhite, hatEnvelope);
-AudioConnection          patchCord7(hatEnvelope, 0, mixer1, 3);
-
-// Mixer -> I2S output (both left and right channels)
-AudioConnection          patchCord8(mixer1, 0, i2s1, 0);    // Left
-AudioConnection          patchCord9(mixer1, 0, i2s1, 1);    // Right
+#include "SynthVoices.h"
 
 // ============================================================================
 // GLOBAL VARIABLES
 // ============================================================================
+// All audio objects (oscillators, envelopes, filters, mixer, codec) and the
+// patch-cord graph live in lib/SynthVoices. SynthVoices.h re-declares them
+// with `extern` so this file - and every mode - can keep poking them by
+// their short names.
 
 // Play mode + master volume
 PlayMode currentMode = MODE_BACKSTAGE;
@@ -155,7 +113,6 @@ unsigned long lastUpdateTime = 0;
 // FUNCTION DECLARATIONS
 // ============================================================================
 
-void setupAudio();
 void processDualLoop();
 void processChordJam();
 void processBassMachine();
@@ -187,15 +144,9 @@ void setup() {
   Serial.println("\n=== Teensy Touchless Instrument (Simulated ToF) ===");
 
   // ---- Step 1/6: Audio engine ----
-  // AudioMemory must be allocated before any AudioStream objects run.
-  AudioMemory(20);
-  sgtl5000_1.enable();
-  sgtl5000_1.volume(masterVolume);
-  mixer1.gain(0, 0.8 * masterVolume);  // String voice
-  mixer1.gain(1, 0.8 * masterVolume);  // Kick drum
-  mixer1.gain(2, 0.7 * masterVolume);  // Snare drum
-  mixer1.gain(3, 0.5 * masterVolume);  // Hi-hat
-  setupAudio();
+  // lib/SynthVoices brings up AudioMemory, the SGTL5000, mixer gains, and
+  // every voice's parameter defaults in one call.
+  SynthVoices::begin(masterVolume);
   Serial.println("Audio system initialized!");
 
   // ---- Step 2/6: OLED (bring up early so we can show progress) ----
@@ -392,47 +343,13 @@ void loop() {
 // ============================================================================
 
 
-void setupAudio() {
-  // String voice setup
-  stringEnvelope.attack(10.0);
-  stringEnvelope.hold(20.0);
-  stringEnvelope.decay(500.0);
-  stringEnvelope.sustain(0.4);
-  stringEnvelope.release(300.0);
-
-  // String filter: lowpass with moderate resonance
-  stringFilter.frequency(2000);
-  stringFilter.resonance(1.2);
-  stringFilter.octaveControl(2.0);
-
-  // Kick drum configuration
-  kickDrum.frequency(60);
-  kickDrum.length(300);
-  kickDrum.secondMix(0.0);
-  kickDrum.pitchMod(0.55);
-
-  // Snare drum configuration
-  snareDrum.frequency(200);
-  snareDrum.length(150);
-  snareDrum.secondMix(0.5);
-  snareDrum.pitchMod(0.3);
-
-  // Hi-hat envelope: short, sharp attack and decay
-  hatEnvelope.attack(1.0);
-  hatEnvelope.hold(0.0);
-  hatEnvelope.decay(50.0);
-  hatEnvelope.sustain(0.0);
-  hatEnvelope.release(50.0);
-
-  // Start noise generator at low amplitude
-  noiseWhite.amplitude(0.3);
-}
-
 // Kill any audio still playing. Called when switching modes and when the
-// player presses the encoder button to "reset" the current mode.
+// player presses the encoder button to "reset" the current mode. The
+// envelope releases live in lib/SynthVoices; the noteActive flag is a
+// project-side state shadow tied to the Karplus-Strong voice, so we clear
+// it here.
 void panicMute() {
-  stringEnvelope.noteOff();
-  hatEnvelope.noteOff();
+  SynthVoices::panic();
   noteActive = false;
 }
 
