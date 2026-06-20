@@ -1,15 +1,20 @@
 ﻿/*
- * Teensy 4.0/4.1 Touchless Instrument - Simulated ToF Version
+ * AURA - Touchless Musical Instrument
  *
- * Hardware: Teensy 4.0 or 4.1 with SGTL5000 Audio Shield
- * Output: I2S to headphone/line out
+ * Hardware:
+ *   - Teensy 4.0 + SGTL5000 audio shield (I2S out to headphones / line out)
+ *   - 2x SparkFun VL53L5CX time-of-flight sensors (8x8 zones each)
+ *   - 2x WS2812B 8x8 NeoPixel matrices (one per hand, serpentine wiring)
+ *   - 1x SSD1306 128x64 OLED status display
+ *   - 1x rotary encoder + push button for mode select
  *
- * Features:
- * - STRING THEREMIN mode: pitch quantization, zones, expression
- * - GESTURE DRUM mode: zone-based drum triggering
- * - Simulated ToF sensors via serial commands
- * - Multiple scales (pentatonic, major, minor)
- * - Gesture simulation (jab, tap, vibrato)
+ * Modes (cycled with the encoder):
+ *   BACKSTAGE     - diagnostic: live sensor grid on both LED matrices
+ *   BACKSTAGE 2   - LED-only animation: pulsing heart + scrolling marquee
+ *   CHORD JAM     - left hand picks chord, right hand strums
+ *   DUAL LOOP     - 8-step looper, left = melody, right = drums
+ *   BASS MACHINE  - 8-step bass sequencer with right-hand filter sweep
+ *   BATTLE MODE   - two-player duel (P1 = CH0, P2 = CH1)
  */
 
 #include <Arduino.h>
@@ -39,38 +44,7 @@ enum PlayMode {
 #define MODE_FIRST  MODE_BACKSTAGE
 #define MODE_LAST   MODE_BATTLE_MODE
 
-enum ScaleType {
-  SCALE_PENTATONIC,
-  SCALE_MAJOR,
-  SCALE_MINOR
-};
-
-enum Zone {
-  ZONE_A_NEAR,   // Bass/low register
-  ZONE_B_MID,    // Melody register
-  ZONE_C_FAR     // Harmonics/bright
-};
-
-// Distance thresholds (mm)
-const int DIST_MIN = 80;
-const int DIST_MAX = 800;
-const int ZONE_A_MAX = 250;   // 80-250mm = Zone A
-const int ZONE_B_MAX = 500;   // 250-500mm = Zone B
-                              // 500-800mm = Zone C
-const int PRESENCE_THRESHOLD = 780;  // Above this = no presence
-
-// Distance change increments
-const int DIST_STEP = 20;
-
-// Zone default positions
-const int ZONE_A_DEFAULT = 150;
-const int ZONE_B_DEFAULT = 350;
-const int ZONE_C_DEFAULT = 650;
-
-// Smoothing
-const float SMOOTH_ALPHA = 0.3;  // Low-pass filter coefficient (0-1, lower = smoother)
-
-// Update rate
+// Main loop tick rate. Sensors + modes update at this cadence.
 const unsigned long UPDATE_INTERVAL_MS = 20;  // 50 Hz
 
 // ============================================================================
@@ -124,148 +98,45 @@ AudioConnection          patchCord9(mixer1, 0, i2s1, 1);    // Right
 // GLOBAL VARIABLES
 // ============================================================================
 
-// Play mode and settings
+// Play mode + master volume
 PlayMode currentMode = MODE_BACKSTAGE;
-ScaleType currentScale = SCALE_PENTATONIC;
-bool muteIfIdle = false;
-bool vibratoEnabled = false;
-bool continuousSound = true;  // Auto re-pluck for sustained sound
-float masterVolume = 1.0;  // Master volume (0.0 to 1.0) - default 100%
+float masterVolume = 1.0;
 
-// Theremin mode variables
-float thereminPitch = 440.0;  // Hz (A4)
-float thereminVolume = 0.5;   // 0.0 to 1.0
-const float THEREMIN_PITCH_STEP = 10.0;  // Hz per key press
-const float THEREMIN_VOLUME_STEP = 0.05;  // Volume change per key press
+// Shared touch threshold: a grid cell is considered "touched" when its
+// distance is between 50 mm and this value. Used by every grid-based mode.
+const int GRID_ZONE_THRESHOLD = 400;  // mm
 
-// Dual Theremin mode variables (using ToF sensors)
-float dualThereminPitch = 440.0;  // Current pitch in Hz
-float dualThereminVolume = 0.5;   // Current volume
-float dualThereminFilter = 1000.0;  // Filter cutoff frequency
-int leftHandCentroidX = 0;   // Left hand X position (0-7)
-int leftHandCentroidY = 0;   // Left hand Y position (0-7)
-int rightHandCentroidX = 0;  // Right hand X position (0-7)
-int rightHandCentroidY = 0;  // Right hand Y position (0-7)
-int leftHandZones = 0;       // Number of active zones (hand coverage)
-int rightHandZones = 0;      // Number of active zones
-float leftHandAvgDist = 2000.0;   // Average distance for left hand
-float rightHandAvgDist = 2000.0;  // Average distance for right hand
-unsigned long lastDualThereminUpdate = 0;
-const int DUAL_THEREMIN_UPDATE_INTERVAL = 50;  // Update every 50ms (20Hz)
-
-// Pitch mapping for dual theremin
-const float DUAL_PITCH_MIN = 110.0;   // A2 - Low note
-const float DUAL_PITCH_MAX = 880.0;   // A5 - High note
-const float DUAL_DIST_MIN = 100.0;    // Minimum distance (mm) for pitch
-const float DUAL_DIST_MAX = 1000.0;   // Maximum distance (mm) for pitch
-
-// Dual Drums mode variables
-float lastLeftHandDist = 2000.0;     // For velocity detection
-float lastRightHandDist = 2000.0;
-unsigned long lastDrumHitTime = 0;
-const int DRUM_HIT_COOLDOWN = 80;    // ms between hits (was 200, now much faster!)
-const float DRUM_VELOCITY_THRESHOLD = 30.0;  // mm/update for hit detection (was 100, now more sensitive!)
-
-// Dual Piano mode variables
-int currentPianoNote = -1;           // -1 = no note playing
-float pianoNoteVelocity = 0.5;
-unsigned long lastPianoNoteTime = 0;
-const int PIANO_NOTE_MIN = 0;        // Lowest note index in scale
-const int PIANO_NOTE_MAX = 12;       // Highest note index (one octave)
-
-// Grid Sequencer mode variables
-bool gridZoneActive[8][8] = {false}; // Track which zones are currently touched
-unsigned long gridZoneLastTrigger[8][8] = {0};  // Debounce timing
-bool gridZoneActiveR[8][8] = {false};           // Right sensor zones
-unsigned long gridZoneLastTriggerR[8][8] = {0};
-const int GRID_ZONE_THRESHOLD = 400;  // mm - closer than this = touched (lowered for intentional touches)
-const int GRID_DEBOUNCE_MS = 50;      // Minimum time between re-triggers
-
-// Rhythm Tapper mode variables
-bool rhythmRowActive[8] = {false};    // Track which drum rows are active
-unsigned long rhythmRowLastHit[8] = {0};
-bool rhythmRowActiveR[8] = {false};   // Right sensor drum rows
-unsigned long rhythmRowLastHitR[8] = {0};
-const int RHYTHM_DEBOUNCE_MS = 80;    // Fast response!
-
-// Arpeggiator mode variables
-unsigned long lastArpNoteTime = 0;
-int arpNoteIndex = 0;                 // Current note in arpeggio pattern
-int arpChordType = 0;                 // 0=major, 1=minor, 2=7th, 3=dim
-float arpSpeed = 200.0;               // ms between arp notes
-const int ARP_CHORD_NOTES = 4;        // Notes per chord
-
-// DJ Scratch mode variables
-float djPitch = 440.0;
-float djLastDist = 2000.0;
-float djScratchSpeed = 0.0;           // Current scratch speed
-bool djIsScratching = false;
-
-// Step Sequencer mode variables
-bool stepGrid[8][8] = {false};        // 8 steps x 8 instruments
-int stepPosition = 0;                 // Current step (0-7)
-unsigned long lastStepTime = 0;
-float stepTempo = 200.0;              // ms per step (300 BPM at 200ms)
-
-// Dual Loop mode variables
-bool dualLoopMelody[8][8] = {false};  // Left hand: 8 steps x 8 notes (piano/strings)
-bool dualLoopDrums[8][8] = {false};   // Right hand: 8 steps x 8 drums
-bool dualLoopTouchL[8][8] = {false};  // Touch state tracking (left)
-bool dualLoopTouchR[8][8] = {false};  // Touch state tracking (right)
+// DUAL LOOP: 8-step melody/drum sequencer driven by both hands.
+bool dualLoopMelody[8][8] = {false};
+bool dualLoopDrums[8][8]  = {false};
+bool dualLoopTouchL[8][8] = {false};
+bool dualLoopTouchR[8][8] = {false};
 unsigned long dualLoopTouchTimeL[8][8] = {0};
 unsigned long dualLoopTouchTimeR[8][8] = {0};
-int dualLoopStep = 0;
+int  dualLoopStep = 0;
 unsigned long dualLoopLastStep = 0;
 float dualLoopTempo = 180.0;          // ms per step
 
-// Chord Jam mode variables
-int chordJamIndex = 0;                // Current chord (0=I, 1=IV, 2=V, 3=vi)
+// CHORD JAM: left hand picks the chord, right hand strums it.
+int  chordJamIndex = 0;               // 0=I, 1=IV, 2=V, 3=vi
 unsigned long chordJamLastStrum = 0;
 bool chordJamTouchState[8][8] = {false};
 unsigned long chordJamTouchTime[8][8] = {0};
 float chordJamStrumVelocity = 0.0;
 
-// Drone + Solo mode variables
-float droneFreq = 130.81;             // C3 default drone
-bool droneActive = false;
-int soloLastNote = -1;
-unsigned long soloLastTrigger = 0;
-
-// Rain Mode variables
-float rainDropRow[8] = {0};           // Y position of each raindrop (float for smooth animation)
-int rainDropNote[8] = {0};            // MIDI note for each drop
-bool rainDropActive[8] = {false};     // Whether each drop slot is active
-float rainDropRowR[8] = {0};          // Right sensor rain drops
-int rainDropNoteR[8] = {0};
-bool rainDropActiveR[8] = {false};
-unsigned long rainLastFall = 0;
-unsigned long rainLastSpawn = 0;
-float rainSpeed = 0.3;                // Rows per update cycle
-
-// Bass Machine mode variables
-bool bassGrid[8][8] = {false};        // 8 steps x 8 bass notes
+// BASS MACHINE: 8-step bass sequencer with a filter sweep on the right hand.
+bool bassGrid[8][8]       = {false};
 bool bassTouchState[8][8] = {false};
 unsigned long bassTouchTime[8][8] = {0};
-int bassStep = 0;
+int  bassStep = 0;
 unsigned long bassLastStep = 0;
-float bassTempo = 200.0;              // ms per step
-float bassFilterFreq = 400.0;         // Filter sweep frequency
+float bassTempo      = 200.0;         // ms per step
+float bassFilterFreq = 400.0;         // Hz, swept by hand distance
 
-// Echo Delay mode variables
-float echoNotes[6] = {0};             // Circular buffer of note frequencies
-float echoVolumes[6] = {0};           // Volume for each echo
-int echoWriteIndex = 0;
-unsigned long echoLastPlay = 0;
-int echoPlayIndex = 0;
-float echoDelayMs = 300.0;            // Delay between echoes
-bool echoPlaying = false;
-unsigned long echoStartTime = 0;
-
-// Battle Mode variables
-float battleFreq[2] = {440.0, 440.0}; // Current frequency for each player
-float battleVol[2] = {0.0, 0.0};      // Current volume for each player
-int battleScore[2] = {0, 0};          // "Dominance" score
-unsigned long battleLastUpdate = 0;
+// BATTLE MODE: two players, two scores, two voices.
+float battleFreq[2]  = {440.0, 440.0};
+float battleVol[2]   = {0.0,   0.0};
+int   battleScore[2] = {0, 0};
 
 // VL53L5CX Distance Sensors (8x8 mode)
 // CH0: I2C0 (Wire) - SDA=18, SCL=19
@@ -297,20 +168,9 @@ CRGB leds_r[NUM_LEDS];      // Right LED matrix array
 // Row 2: LED 16 â†’ 17 â†’ 18 â†’ 19 â†’ 20 â†’ 21 â†’ 22 â†’ 23
 // ... and so on
 
-// LED Test Mode Variables
-enum LEDColor {
-  LED_RED,
-  LED_GREEN,
-  LED_BLUE,
-  LED_YELLOW,
-  LED_WHITE,
-  LED_OFF
-};
-LEDColor currentLEDColor = LED_RED;
-int selectedLED = 0;  // Currently selected LED (0-7)
-
-// LED Visualization Settings
-bool ledVisualizationEnabled = true;  // Enable/disable LED visualization in DISTANCE mode
+// Global LED visualization gate. Each mode checks this before lighting
+// up its matrices so we can blank the panels for "stage" demos.
+bool ledVisualizationEnabled = true;
 
 // ============================================================================
 // OLED DISPLAY CONFIGURATION
@@ -337,48 +197,12 @@ bool lastButtonState = HIGH;
 unsigned long lastButtonPress = 0;
 const unsigned long DEBOUNCE_DELAY = 50;  // ms
 
-// Simulated ToF sensor values (raw)
-int pitchHandRaw = 350;  // mm
-int exprHandRaw = 400;   // mm
-
-// Smoothed sensor values
-float pitchHandSmooth = 350.0;
-float exprHandSmooth = 400.0;
-
-// Current zone
-Zone currentZone = ZONE_B_MID;
-
-// Current note state
-int currentNoteIndex = 0;
-int currentMidiNote = 60;  // Middle C
-float currentFrequency = 261.63;  // Hz
+// True when a Karplus-Strong string voice is currently sustaining. Lets
+// panicMute() know whether it actually needs to release the envelope.
 bool noteActive = false;
 
-// Timing
+// Main-loop timer for the fixed-rate sensor + mode update.
 unsigned long lastUpdateTime = 0;
-unsigned long lastPluckTime = 0;
-const unsigned long REPLUCK_INTERVAL_MS = 800;  // Re-pluck every 800ms to sustain
-
-// Vibrato
-float vibratoPhase = 0.0;
-const float VIBRATO_RATE = 5.0;  // Hz
-const float VIBRATO_DEPTH = 0.02;  // Â±2% pitch variation
-
-// ============================================================================
-// SCALE DEFINITIONS
-// ============================================================================
-
-// Pentatonic scale intervals (semitones from root)
-const int pentatonicScale[] = {0, 2, 4, 7, 9};
-const int pentatonicSize = 5;
-
-// Major scale intervals
-const int majorScale[] = {0, 2, 4, 5, 7, 9, 11};
-const int majorSize = 7;
-
-// Minor scale intervals (natural minor)
-const int minorScale[] = {0, 2, 3, 5, 7, 8, 10};
-const int minorSize = 7;
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -393,9 +217,7 @@ void calculateHandMetrics(uint16_t grid[8][8], float& avgDistance, int& centroid
 void panicMute();
 bool initDistanceSensor(uint8_t channel);
 void readDistanceGrid(uint8_t channel);
-void smoothSensorValues();
 void setupLEDs();
-void setLED(int index, CRGB color);
 void clearAllLEDs();
 CRGB distanceToColor(uint16_t distance_mm);
 int xyToLEDIndex(int row, int col);
@@ -497,9 +319,6 @@ void loop() {
   unsigned long currentTime = millis();
   if (currentTime - lastUpdateTime >= UPDATE_INTERVAL_MS) {
     lastUpdateTime = currentTime;
-
-    // Smooth sensor values
-    smoothSensorValues();
 
     // Dispatch to the active mode. Each branch is responsible for reading
     // whatever sensor data it needs and driving its own audio + LEDs.
@@ -674,97 +493,12 @@ void setupAudio() {
   noiseWhite.amplitude(0.3);
 }
 
-void smoothSensorValues() {
-  // Simple exponential moving average (low-pass filter)
-  pitchHandSmooth = pitchHandSmooth * (1.0 - SMOOTH_ALPHA) + pitchHandRaw * SMOOTH_ALPHA;
-  exprHandSmooth = exprHandSmooth * (1.0 - SMOOTH_ALPHA) + exprHandRaw * SMOOTH_ALPHA;
-}
-
-Zone calculateZone(float distance) {
-  if (distance <= ZONE_A_MAX) {
-    return ZONE_A_NEAR;
-  } else if (distance <= ZONE_B_MAX) {
-    return ZONE_B_MID;
-  } else {
-    return ZONE_C_FAR;
-  }
-}
-
-int distanceToNoteIndex(float distance, Zone zone) {
-  // Map distance to note index within zone
-  // Each zone spans about 250mm, map to ~12 semitones (1 octave)
-
-  int zoneStart = 0;
-  int zoneRange = 0;
-
-  if (zone == ZONE_A_NEAR) {
-    zoneStart = DIST_MIN;
-    zoneRange = ZONE_A_MAX - DIST_MIN;  // 170mm
-  } else if (zone == ZONE_B_MID) {
-    zoneStart = ZONE_A_MAX;
-    zoneRange = ZONE_B_MAX - ZONE_A_MAX;  // 250mm
-  } else {  // ZONE_C_FAR
-    zoneStart = ZONE_B_MAX;
-    zoneRange = DIST_MAX - ZONE_B_MAX;  // 300mm
-  }
-
-  // Normalize distance within zone (0.0 to 1.0)
-  float normalized = (distance - zoneStart) / (float)zoneRange;
-  normalized = constrain(normalized, 0.0, 1.0);
-
-  // Map to note index (0-11 for 12 semitones)
-  int noteIndex = (int)(normalized * 11.0);
-
-  return noteIndex;
-}
-
-float noteIndexToFrequency(int noteIndex, ScaleType scale, Zone zone) {
-  // Determine base MIDI note based on zone
-  int baseMidi = 0;
-
-  if (zone == ZONE_A_NEAR) {
-    baseMidi = 45;  // A2 (bass register)
-  } else if (zone == ZONE_B_MID) {
-    baseMidi = 57;  // A3 (melody register)
-  } else {  // ZONE_C_FAR
-    baseMidi = 69;  // A4 (high register)
-  }
-
-  // Get scale intervals
-  const int* scaleIntervals;
-  int scaleSize;
-
-  if (scale == SCALE_PENTATONIC) {
-    scaleIntervals = pentatonicScale;
-    scaleSize = pentatonicSize;
-  } else if (scale == SCALE_MAJOR) {
-    scaleIntervals = majorScale;
-    scaleSize = majorSize;
-  } else {  // SCALE_MINOR
-    scaleIntervals = minorScale;
-    scaleSize = minorSize;
-  }
-
-  // Map note index to scale degree
-  int octave = noteIndex / scaleSize;
-  int degree = noteIndex % scaleSize;
-
-  // Calculate MIDI note
-  int midiNote = baseMidi + (octave * 12) + scaleIntervals[degree];
-
-  // Convert MIDI to frequency: f = 440 * 2^((n-69)/12)
-  float frequency = 440.0 * pow(2.0, (midiNote - 69) / 12.0);
-
-  return frequency;
-}
-
 // Kill any audio still playing. Called when switching modes and when the
 // player presses the encoder button to "reset" the current mode.
 void panicMute() {
   stringEnvelope.noteOff();
   hatEnvelope.noteOff();
   noteActive = false;
-  vibratoPhase = 0.0;
 }
 
 // Walk an 8x8 distance grid and report where the player's hand is and how
@@ -1456,201 +1190,6 @@ void readDistanceGrid(uint8_t channel) {
   }
 }
 
-void printDistanceGrid(uint8_t channel) {
-  // Print the 8x8 distance grid in a readable format
-  // channel: 0 = CH0 (I2C0), 1 = CH1 (I2C1)
-  // Each cell shows distance in millimeters
-  // Cells with distance < 200mm are marked with *** to track target shape
-  // This represents a low-resolution depth map
-
-  uint16_t (*grid)[8];
-
-  if (channel == 0) {
-    grid = distanceGrid_ch0;
-  } else {
-    grid = distanceGrid_ch1;
-  }
-
-  Serial.println("\n========== VL53L5CX 8x8 DISTANCE GRID (mm) ==========");
-  Serial.print("Channel: CH");
-  Serial.print(channel);
-  Serial.print(" (I2C");
-  Serial.print(channel);
-  Serial.println(")");
-  Serial.println("(Each cell = one zone, 64 zones total)");
-  Serial.println("(*** = distance < 200mm - TARGET DETECTED!)");
-  Serial.println();
-
-  // Print column headers
-  Serial.print("     ");
-  for (int col = 0; col < 8; col++) {
-    Serial.print("  C");
-    Serial.print(col);
-    Serial.print("  ");
-  }
-  Serial.println();
-  Serial.println("   +-----+-----+-----+-----+-----+-----+-----+-----+");
-
-  // Print each row
-  for (int row = 0; row < 8; row++) {
-    Serial.print("R");
-    Serial.print(row);
-    Serial.print(" |");
-
-    for (int col = 0; col < 8; col++) {
-      uint16_t dist = grid[row][col];
-
-      // Mark targets (distance < 200mm) with ***
-      bool isTarget = (dist < 200);
-
-      if (isTarget) {
-        // Show *** for close targets
-        Serial.print(" *** ");
-      } else {
-        // Format: 5 characters wide, right-aligned for far objects
-        if (dist >= 10000) {
-          Serial.print(" ----");  // Out of range
-        } else if (dist >= 1000) {
-          Serial.print(dist);
-          Serial.print(" ");
-        } else if (dist >= 100) {
-          Serial.print(" ");
-          Serial.print(dist);
-          Serial.print(" ");
-        } else if (dist >= 10) {
-          Serial.print("  ");
-          Serial.print(dist);
-          Serial.print(" ");
-        } else {
-          Serial.print("   ");
-          Serial.print(dist);
-          Serial.print(" ");
-        }
-      }
-
-      Serial.print("|");
-    }
-    Serial.println();
-    Serial.println("   +-----+-----+-----+-----+-----+-----+-----+-----+");
-  }
-
-  Serial.println();
-}
-
-void printBothGrids() {
-  // Print both 8x8 distance grids side by side
-  // Shows CH0 (left) and CH1 (right) for two-hand tracking
-
-  Serial.println("\n============ VL53L5CX DUAL SENSOR VIEW (mm) ============");
-  Serial.println("        CH0 (I2C0)                    CH1 (I2C1)");
-  Serial.println("(*** = distance < 200mm - TARGET DETECTED!)");
-  Serial.println();
-
-  // Print column headers for both grids
-  Serial.print("     ");
-  for (int col = 0; col < 8; col++) {
-    Serial.print("  C");
-    Serial.print(col);
-    Serial.print("  ");
-  }
-  Serial.print("       ");  // Space between grids
-  for (int col = 0; col < 8; col++) {
-    Serial.print("  C");
-    Serial.print(col);
-    Serial.print("  ");
-  }
-  Serial.println();
-
-  // Print separator line for both grids
-  Serial.print("   +-----+-----+-----+-----+-----+-----+-----+-----+");
-  Serial.print("     ");
-  Serial.println("+-----+-----+-----+-----+-----+-----+-----+-----+");
-
-  // Print each row for both grids side by side
-  for (int row = 0; row < 8; row++) {
-    // Print CH0 row
-    Serial.print("R");
-    Serial.print(row);
-    Serial.print(" |");
-
-    for (int col = 0; col < 8; col++) {
-      uint16_t dist = distanceGrid_ch0[row][col];
-      bool isTarget = (dist < 200);
-
-      if (isTarget) {
-        Serial.print(" *** ");
-      } else {
-        if (dist >= 10000) {
-          Serial.print(" ----");
-        } else if (dist >= 1000) {
-          Serial.print(dist);
-          Serial.print(" ");
-        } else if (dist >= 100) {
-          Serial.print(" ");
-          Serial.print(dist);
-          Serial.print(" ");
-        } else if (dist >= 10) {
-          Serial.print("  ");
-          Serial.print(dist);
-          Serial.print(" ");
-        } else {
-          Serial.print("   ");
-          Serial.print(dist);
-          Serial.print(" ");
-        }
-      }
-      Serial.print("|");
-    }
-
-    // Space between grids
-    Serial.print("   ");
-
-    // Print CH1 row
-    Serial.print("R");
-    Serial.print(row);
-    Serial.print(" |");
-
-    for (int col = 0; col < 8; col++) {
-      uint16_t dist = distanceGrid_ch1[row][col];
-      bool isTarget = (dist < 200);
-
-      if (isTarget) {
-        Serial.print(" *** ");
-      } else {
-        if (dist >= 10000) {
-          Serial.print(" ----");
-        } else if (dist >= 1000) {
-          Serial.print(dist);
-          Serial.print(" ");
-        } else if (dist >= 100) {
-          Serial.print(" ");
-          Serial.print(dist);
-          Serial.print(" ");
-        } else if (dist >= 10) {
-          Serial.print("  ");
-          Serial.print(dist);
-          Serial.print(" ");
-        } else {
-          Serial.print("   ");
-          Serial.print(dist);
-          Serial.print(" ");
-        }
-      }
-      Serial.print("|");
-    }
-
-    Serial.println();
-
-    // Print separator line for both grids
-    Serial.print("   +-----+-----+-----+-----+-----+-----+-----+-----+");
-    Serial.print("     ");
-    Serial.println("+-----+-----+-----+-----+-----+-----+-----+-----+");
-  }
-
-  Serial.println();
-}
-
-
 // ============================================================================
 // LED FUNCTIONS
 // ============================================================================
@@ -1667,22 +1206,6 @@ void setupLEDs() {
   Serial.println(" LEDs (8x8, serpentine layout)");
 }
 
-void setLED(int index, CRGB color) {
-  // Set a specific LED on the left matrix
-  if (index >= 0 && index < NUM_LEDS) {
-    leds[index] = color;
-    FastLED.show();
-  }
-}
-
-void setLED_R(int index, CRGB color) {
-  // Set a specific LED on the right matrix
-  if (index >= 0 && index < NUM_LEDS) {
-    leds_r[index] = color;
-    FastLED.show();
-  }
-}
-
 void clearAllLEDs() {
   // Turn off all LEDs on both matrices
   for (int i = 0; i < NUM_LEDS; i++) {
@@ -1690,25 +1213,6 @@ void clearAllLEDs() {
     leds_r[i] = CRGB::Black;
   }
   FastLED.show();
-}
-
-CRGB getLEDColor(LEDColor colorEnum) {
-  // Convert our color enum to FastLED CRGB color
-  switch (colorEnum) {
-    case LED_RED:
-      return CRGB::Red;
-    case LED_GREEN:
-      return CRGB::Green;
-    case LED_BLUE:
-      return CRGB::Blue;
-    case LED_YELLOW:
-      return CRGB::Yellow;
-    case LED_WHITE:
-      return CRGB::White;
-    case LED_OFF:
-    default:
-      return CRGB::Black;
-  }
 }
 
 CRGB distanceToColor(uint16_t distance_mm) {
@@ -1752,57 +1256,6 @@ int xyToLEDIndex(int row, int col) {
     // Odd rows (1, 3, 5, 7): right to left
     return row * MATRIX_WIDTH + (MATRIX_WIDTH - 1 - col);
   }
-}
-
-void updateLEDsFromSensorRow(uint8_t channel, uint8_t row) {
-  // Update the 8 LEDs based on a specific row from the sensor grid
-  // channel: 0 = CH0, 1 = CH1
-  // row: 0-7 (which row of the 8x8 grid to visualize)
-
-  uint16_t (*grid)[8];
-
-  if (channel == 0) {
-    grid = distanceGrid_ch0;
-  } else {
-    grid = distanceGrid_ch1;
-  }
-
-  // Map each column in the specified row to an LED using serpentine layout
-  for (int col = 0; col < MATRIX_WIDTH; col++) {
-    uint16_t distance = grid[row][col];
-    CRGB color = distanceToColor(distance);
-    int ledIndex = xyToLEDIndex(row, col);
-    leds[ledIndex] = color;
-  }
-
-  // Update the LED strip
-  FastLED.show();
-}
-
-void updateLEDsFromFullGrid(uint8_t channel) {
-  // Update ALL 64 LEDs based on the full 8x8 sensor grid
-  // channel: 0 = CH0, 1 = CH1
-
-  uint16_t (*grid)[8];
-
-  if (channel == 0) {
-    grid = distanceGrid_ch0;
-  } else {
-    grid = distanceGrid_ch1;
-  }
-
-  // Map entire 8x8 grid to 8x8 LED matrix using serpentine layout
-  for (int row = 0; row < MATRIX_HEIGHT; row++) {
-    for (int col = 0; col < MATRIX_WIDTH; col++) {
-      uint16_t distance = grid[row][col];
-      CRGB color = distanceToColor(distance);
-      int ledIndex = xyToLEDIndex(row, col);
-      leds[ledIndex] = color;
-    }
-  }
-
-  // Update the LED strip
-  FastLED.show();
 }
 
 // ============================================================================
@@ -1939,20 +1392,12 @@ const char* getModeString(PlayMode mode) {
   }
 }
 
-const char* getScaleString(ScaleType scale) {
-  switch (scale) {
-    case SCALE_PENTATONIC: return "PENTATONIC";
-    case SCALE_MAJOR: return "MAJOR";
-    case SCALE_MINOR: return "MINOR";
-    default: return "UNKNOWN";
-  }
-}
-
 // ============================================================================
-// MODE SWITCHING FUNCTION (used by both serial commands and encoder)
+// MODE SWITCHING
 // ============================================================================
 
-// Flag to prevent mode switching during initialization
+// Re-entrancy guard so a fast double-click on the encoder button can't fire
+// two mode-enter blocks on top of each other.
 bool isSwitchingMode = false;
 
 void switchToMode(PlayMode newMode) {
