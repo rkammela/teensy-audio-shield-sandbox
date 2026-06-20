@@ -65,7 +65,6 @@ bool sensor_ch1_initialized = false;
 uint16_t distanceGrid_ch0[8][8];  // 8x8 distance array for CH0
 uint16_t distanceGrid_ch1[8][8];  // 8x8 distance array for CH1
 unsigned long lastSensorRead = 0;
-uint8_t currentSensorChannel = 0;  // 0 = CH0, 1 = CH1, 2 = BOTH
 
 // LED matrices (pin assignments / dimensions live in Config.h).
 // Serpentine layout: row 0 is left-to-right, row 1 is right-to-left, etc.
@@ -94,7 +93,6 @@ unsigned long lastUpdateTime = 0;
 // Most helper declarations live in include/AuraState.h. Only the bits that
 // are still defined in this file - the mode-switching glue and a couple of
 // boot-time wrappers - need forward decls here.
-void calculateHandMetrics(uint16_t grid[8][8], float& avgDistance, int& centroidX, int& centroidY, int& activeZones);
 void setupLEDs();
 void clearAllLEDs();
 void setupOLED();
@@ -213,19 +211,6 @@ void panicMute() {
   noteActive = false;
 }
 
-// Thin wrapper around lib/ToFGrid::calculateHandMetrics so existing call
-// sites stay identical. The hand-detection thresholds live inside the
-// library (50..800 mm "hand cell" band).
-void calculateHandMetrics(uint16_t grid[8][8], float& avgDistance,
-                          int& centroidX, int& centroidY, int& activeZones) {
-  ToFGrid::calculateHandMetrics(grid, avgDistance, centroidX, centroidY, activeZones);
-}
-
-// Per-mode processors live in src/modes/*.cpp now. The big function bodies
-// (processDualLoop, processChordJam, processBassMachine, processBattleMode,
-// and the BACKSTAGE / BACKSTAGE_2 inline blocks) were all moved out as part
-// of Phase 4a and dispatched from loop() through their namespaces above.
-
 // Thin wrappers around lib/ToFGrid: route CH0 to Wire and CH1 to Wire1, and
 // hand each channel its own buffer. The library owns the sensor instances,
 // ranging configuration, and the 180-degree flip applied to every frame.
@@ -251,7 +236,7 @@ void readDistanceGrid(uint8_t channel) {
 // ============================================================================
 
 void setupLEDs() {
-  // Initialize FastLED library â€” two 8x8 matrices
+  // Initialize FastLED library -- two 8x8 matrices
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);    // Left matrix (pin 0)
   FastLED.addLeds<LED_TYPE, LED_PIN_R, COLOR_ORDER>(leds_r, NUM_LEDS); // Right matrix (pin 1)
   FastLED.setBrightness(50);  // Set brightness (0-255), 50 is moderate
@@ -309,8 +294,9 @@ const char* getModeString(PlayMode mode) {
 // ============================================================================
 
 // Re-entrancy guard so a fast double-click on the encoder button can't fire
-// two mode-enter blocks on top of each other.
-bool isSwitchingMode = false;
+// two mode-enter blocks on top of each other. File-local: only switchToMode
+// touches it.
+static bool isSwitchingMode = false;
 
 void switchToMode(PlayMode newMode) {
   // Prevent overlapping mode switches
